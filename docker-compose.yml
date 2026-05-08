@@ -1,0 +1,36 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: demaestro-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend:/app
+      - ./backend/secrets:/app/secrets:ro
+      # Mount Docker socket so the backend can launch sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    image: node:20-alpine
+    container_name: demaestro-frontend
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+    env_file:
+      - ./frontend/.env
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+
+# Notes:
+# - Run with: docker compose up
+# - Both services hot-reload from your local files (volume mounts).
+# - The /var/run/docker.sock mount lets the backend spawn sandbox containers
+#   for the Claude code-execution loop. Only needed in later weeks.
+# - Generated apps' Postgres/Mongo containers are launched on demand by the
+#   sandbox layer and are not declared here.

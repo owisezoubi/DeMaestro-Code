@@ -3,6 +3,7 @@
 Pydantic-Settings reads from a .env file at the project root and
 exposes a typed `settings` object that the rest of the app imports.
 """
+
 from functools import lru_cache
 from pathlib import Path
 from typing import List
@@ -28,6 +29,7 @@ class Settings(BaseSettings):
     firebase_service_account_path: str = Field(
         default="secrets/firebase-service-account.json"
     )
+    firebase_service_account_b64: str = Field(default="")
 
     # --- AI ---
     gemini_api_key: str = Field(default="")

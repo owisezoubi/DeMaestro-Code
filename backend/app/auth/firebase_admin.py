@@ -1,4 +1,7 @@
 """Firebase Admin SDK initialization and Firestore client accessor."""
+
+import base64
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -13,25 +16,61 @@ log = structlog.get_logger(__name__)
 _app: Optional[firebase_admin.App] = None
 
 
-def init_firebase() -> firebase_admin.App:
-    """Initialize the Firebase Admin SDK once at app startup."""
-    global _app
-    if _app is not None:
-        return _app
+def _resolve_credentials() -> Optional[credentials.Certificate]:
+    """Return Firebase credentials from one of two sources, in order:
 
+    1. The FIREBASE_SERVICE_ACCOUNT_B64 env var (cloud deploys like Render)
+       — the JSON service account encoded as base64.
+    2. A JSON file at FIREBASE_SERVICE_ACCOUNT_PATH (local development).
+    """
+    # Cloud path: env var takes precedence
+    if settings.firebase_service_account_b64:
+        try:
+            decoded = base64.b64decode(settings.firebase_service_account_b64)
+            data = json.loads(decoded)
+            log.info(
+                "firebase_credentials_from_env",
+                project_id=data.get("project_id"),
+            )
+            return credentials.Certificate(data)
+        except Exception as exc:
+            log.error("firebase_b64_decode_failed", error=str(exc))
+            return None
+
+    # Local path: JSON file
     cred_path: Path = settings.firebase_service_account_full_path
     if not cred_path.exists():
         log.warning(
             "firebase_credentials_missing",
             path=str(cred_path),
-            hint="Place service-account JSON at this path. See SETUP_GUIDE.md §2.6.",
+            hint=(
+                "Set FIREBASE_SERVICE_ACCOUNT_B64 env var (cloud) or place "
+                "service-account JSON at this path (local). "
+                "See SETUP_GUIDE.md §2.6."
+            ),
         )
-        # Allow the app to start in dev so endpoints that don't need Firebase
-        # remain reachable (e.g. /health). Endpoints that *do* need Firebase
-        # will fail with a clear error when called.
-        return None  # type: ignore[return-value]
+        return None
 
-    cred = credentials.Certificate(str(cred_path))
+    log.info("firebase_credentials_from_file", path=str(cred_path))
+    return credentials.Certificate(str(cred_path))
+
+
+def init_firebase() -> Optional[firebase_admin.App]:
+    """Initialize the Firebase Admin SDK once at app startup.
+
+    Returns the App instance on success, or None when no credentials are
+    available. Endpoints that don't need Firebase (e.g. /health) remain
+    reachable; endpoints that *do* need Firebase will fail with a clear
+    error when called.
+    """
+    global _app
+    if _app is not None:
+        return _app
+
+    cred = _resolve_credentials()
+    if cred is None:
+        return None
+
     _app = firebase_admin.initialize_app(cred)
     log.info("firebase_initialized", project_id=cred.project_id)
     return _app

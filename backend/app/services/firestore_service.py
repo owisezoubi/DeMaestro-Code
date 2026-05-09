@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.auth.firebase_admin import get_firestore_client
-from app.models.project import ProjectMeta
+from app.models.project import ProjectMeta, ProjectStatus
+from app.models.raw_input import RawInputDoc
 
 
 def _users():
@@ -89,3 +90,31 @@ def delete_project(uid: str, project_id: str) -> None:
     """NOTE: this only deletes the project doc, not subcollections.
     Full cascade is left for a later improvement (Week 6 polish)."""
     _project_doc(uid, project_id).delete()
+
+
+# ---------- Raw inputs ----------
+
+def _raw_inputs_col(uid: str, project_id: str):
+    return _project_doc(uid, project_id).collection("raw_inputs")
+
+
+def add_raw_input(uid: str, project_id: str, raw_input: RawInputDoc) -> str:
+    """Write a RawInputDoc to Firestore and return its ID."""
+    ref = _raw_inputs_col(uid, project_id).document(raw_input.id)
+    ref.set(raw_input.model_dump(exclude={"id"}))
+    return raw_input.id
+
+
+def list_raw_inputs(uid: str, project_id: str) -> list[RawInputDoc]:
+    """Return all raw inputs for a project, newest first."""
+    snaps = (
+        _raw_inputs_col(uid, project_id)
+        .order_by("timestamp", direction="DESCENDING")
+        .stream()
+    )
+    return [RawInputDoc.model_validate({**s.to_dict(), "id": s.id}) for s in snaps]
+
+
+def set_project_status(uid: str, project_id: str, status: ProjectStatus) -> None:
+    """Convenience wrapper that stamps the project with a new status."""
+    update_project(uid, project_id, {"status": status})

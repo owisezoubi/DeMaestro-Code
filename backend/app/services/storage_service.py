@@ -20,6 +20,15 @@ def upload_file(blob_path: str, local_path: Path, content_type: str | None = Non
     return blob_path
 
 
+def upload_pdf(uid: str, project_id: str, input_id: str, pdf_bytes: bytes) -> str:
+    """Upload a PDF to users/{uid}/projects/{projectId}/uploads/{inputId}.pdf.
+
+    Returns the storage path.
+    """
+    path = f"users/{uid}/projects/{project_id}/uploads/{input_id}.pdf"
+    return upload_bytes(path, pdf_bytes, content_type="application/pdf")
+
+
 def signed_download_url(blob_path: str, expires_in_minutes: int = 15) -> str:
     bucket = get_storage_bucket()
     blob = bucket.blob(blob_path)

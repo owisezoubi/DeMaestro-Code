@@ -1,30 +1,32 @@
 """FastAPI dependency that verifies a Firebase ID token from the request."""
+
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.firebase_admin import verify_id_token
 from app.models.user import AuthUser
 
+bearer_scheme = HTTPBearer(auto_error=False)
+
 
 async def get_current_user(
-    authorization: Annotated[str | None, Header()] = None,
+    creds: Annotated[
+        HTTPAuthorizationCredentials | None, Depends(bearer_scheme)
+    ] = None,
 ) -> AuthUser:
-    """Extract and verify the Firebase ID token from the Authorization header.
-
-    Frontend should send:  Authorization: Bearer <firebase-id-token>
-    """
-    if not authorization or not authorization.startswith("Bearer "):
+    """Extract and verify the Firebase ID token from the Authorization header."""
+    if not creds or creds.scheme.lower() != "bearer" or not creds.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or malformed Authorization header",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = authorization.removeprefix("Bearer ").strip()
     try:
-        claims = verify_id_token(token)
-    except Exception as exc:  # firebase raises various exception classes
+        claims = verify_id_token(creds.credentials)
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid Firebase token: {exc}",

@@ -1,26 +1,19 @@
 import { useEffect } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { LogOut, Plus, FolderOpen } from 'lucide-react'
-import { toast } from 'sonner'
 
 import Logo from '../components/Logo'
 import { useAuth } from '../context/AuthContext'
-import {
-  listProjects,
-  createProject,
-  ensureUserProfile,
-} from '../api/projects'
+import { listProjects, ensureUserProfile } from '../api/projects'
 
 export default function Dashboard() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
-  const qc = useQueryClient()
 
   // Make sure the backend has a user doc for this UID.
   useEffect(() => {
     ensureUserProfile().catch((err) => {
-      // Most likely cause is the backend isn't running yet — surface gently.
       console.warn('ensureUserProfile failed', err.friendlyMessage)
     })
   }, [])
@@ -30,18 +23,8 @@ export default function Dashboard() {
     queryFn: listProjects,
   })
 
-  const createMut = useMutation({
-    mutationFn: (name) => createProject(name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['projects'] })
-      toast.success('Project created')
-    },
-    onError: (err) => toast.error(err.friendlyMessage || 'Failed to create'),
-  })
-
   function onCreate() {
-    const name = window.prompt('New project name?')
-    if (name && name.trim()) createMut.mutate(name.trim())
+    navigate('/projects/new')
   }
 
   async function onLogout() {
@@ -79,7 +62,6 @@ export default function Dashboard() {
           </h1>
           <button
             onClick={onCreate}
-            disabled={createMut.isPending}
             className="btn-primary"
           >
             <Plus className="w-4 h-4 mr-2" />

@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
+import NewProject from './pages/NewProject'
 import ProtectedRoute from './components/ProtectedRoute'
 
 export default function App() {
@@ -15,6 +16,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <Dashboard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/new"
+        element={
+          <ProtectedRoute>
+            <NewProject />
           </ProtectedRoute>
         }
       />

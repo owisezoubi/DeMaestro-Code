@@ -30,6 +30,7 @@ class Settings(BaseSettings):
         default="secrets/firebase-service-account.json"
     )
     firebase_service_account_b64: str = Field(default="")
+    firebase_storage_bucket: str = Field(default="")
 
     # --- AI ---
     gemini_api_key: str = Field(default="")

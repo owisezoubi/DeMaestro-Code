@@ -56,13 +56,7 @@ def _resolve_credentials() -> Optional[credentials.Certificate]:
 
 
 def init_firebase() -> Optional[firebase_admin.App]:
-    """Initialize the Firebase Admin SDK once at app startup.
-
-    Returns the App instance on success, or None when no credentials are
-    available. Endpoints that don't need Firebase (e.g. /health) remain
-    reachable; endpoints that *do* need Firebase will fail with a clear
-    error when called.
-    """
+    """Initialize the Firebase Admin SDK once at app startup."""
     global _app
     if _app is not None:
         return _app
@@ -71,8 +65,17 @@ def init_firebase() -> Optional[firebase_admin.App]:
     if cred is None:
         return None
 
-    _app = firebase_admin.initialize_app(cred)
-    log.info("firebase_initialized", project_id=cred.project_id)
+    # Pass the storage bucket name so storage.bucket() works without args.
+    options = None
+    if settings.firebase_storage_bucket:
+        options = {"storageBucket": settings.firebase_storage_bucket}
+
+    _app = firebase_admin.initialize_app(cred, options)
+    log.info(
+        "firebase_initialized",
+        project_id=cred.project_id,
+        storage_bucket=settings.firebase_storage_bucket or "(not set)",
+    )
     return _app
 
 

@@ -3,6 +3,7 @@
 Run locally with:
     uvicorn app.main:app --reload
 """
+
 from contextlib import asynccontextmanager
 import logging
 
@@ -67,6 +68,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -85,6 +87,4 @@ app.include_router(projects_routes.router, prefix="/projects", tags=["projects"]
 app.include_router(
     requirements_routes.router, prefix="/projects", tags=["requirements"]
 )
-app.include_router(
-    generation_routes.router, prefix="/projects", tags=["generation"]
-)
+app.include_router(generation_routes.router, prefix="/projects", tags=["generation"])

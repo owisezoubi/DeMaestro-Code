@@ -13,12 +13,14 @@ Document layout (matches the Phase B Architecture Guide):
             ├── verification_logs/{logId}
             └── exports/{exportId}
 """
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.auth.firebase_admin import get_firestore_client
 from app.models.project import ProjectMeta, ProjectStatus
 from app.models.raw_input import RawInputDoc
+from app.models.structured_requirements import StructuredRequirements
 
 
 def _users():
@@ -118,3 +120,57 @@ def list_raw_inputs(uid: str, project_id: str) -> list[RawInputDoc]:
 def set_project_status(uid: str, project_id: str, status: ProjectStatus) -> None:
     """Convenience wrapper that stamps the project with a new status."""
     update_project(uid, project_id, {"status": status})
+
+
+# ---------- Structured requirements ----------
+
+def _structured_requirements_col(uid: str, project_id: str):
+    return _project_doc(uid, project_id).collection("structured_requirements")
+
+
+def add_structured_requirements(uid: str, project_id: str, sr: StructuredRequirements) -> str:
+    """Write a StructuredRequirements version doc and return its doc id (e.g. 'v1')."""
+    ver_id = f"v{sr.version}"
+    _structured_requirements_col(uid, project_id).document(ver_id).set(sr.model_dump())
+    return ver_id
+
+
+def get_latest_structured_requirements(uid: str, project_id: str) -> Optional[StructuredRequirements]:
+    """Return the highest-versioned StructuredRequirements, or None if none exist."""
+    snaps = list(_structured_requirements_col(uid, project_id).stream())
+    if not snaps:
+        return None
+    best = max(snaps, key=lambda s: s.to_dict().get("version", 0))
+    return StructuredRequirements.model_validate(best.to_dict())
+
+
+# ---------- Clarification turns ----------
+
+def _clarifications_col(uid: str, project_id: str):
+    return _project_doc(uid, project_id).collection("clarifications")
+
+
+def add_clarification_turn(
+    uid: str,
+    project_id: str,
+    ambiguity_id: str,
+    question: str,
+    answer: str,
+) -> str:
+    """Record a clarification Q&A turn and return its turn id."""
+    turn_id = uuid.uuid4().hex[:12]
+    _clarifications_col(uid, project_id).document(turn_id).set(
+        {
+            "ambiguity_id": ambiguity_id,
+            "question": question,
+            "answer": answer,
+            "timestamp": datetime.now(timezone.utc),
+        }
+    )
+    return turn_id
+
+
+def list_clarification_turns(uid: str, project_id: str) -> list[dict]:
+    """Return all clarification turns for a project, oldest first."""
+    snaps = _clarifications_col(uid, project_id).order_by("timestamp").stream()
+    return [{**s.to_dict(), "id": s.id} for s in snaps]

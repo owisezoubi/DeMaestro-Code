@@ -34,6 +34,8 @@ class ProjectStatusResponse(BaseModel):
     status: ProjectStatus
     updated_at: Optional[datetime]
     raw_input_count: int
+    ambiguity_count: int
+    latest_version: Optional[int]
 
 
 # ---------- Routes ----------
@@ -137,9 +139,12 @@ async def project_status(
     """Return current pipeline status and raw input count for polling."""
     project = _require_project(user.uid, project_id)
     raw_inputs = firestore_service.list_raw_inputs(user.uid, project_id)
+    latest_sr = firestore_service.get_latest_structured_requirements(user.uid, project_id)
     return ProjectStatusResponse(
         project_id=project_id,
         status=project.status,
         updated_at=project.updated_at,
         raw_input_count=len(raw_inputs),
+        ambiguity_count=len(latest_sr.ambiguities) if latest_sr else 0,
+        latest_version=latest_sr.version if latest_sr else None,
     )

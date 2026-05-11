@@ -9,6 +9,7 @@ import { ArrowLeft, FileText, Upload, X } from 'lucide-react'
 import Logo from '../components/Logo'
 import { createProject } from '../api/projects'
 import { submitTextRequirements, submitPdfRequirements } from '../api/requirements'
+import { triggerStructuring } from '../api/structure'
 
 function formatBytes(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -69,10 +70,16 @@ export default function NewProject() {
         await submitPdfRequirements(id, file)
       }
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       qc.invalidateQueries({ queryKey: ['projects'] })
       toast.success('Project created!')
-      navigate('/dashboard')
+      const projectId = projectIdRef.current
+      try {
+        await triggerStructuring(projectId)
+      } catch (err) {
+        toast.error(err.friendlyMessage || 'Failed to start analysis. You can retry from the project page.')
+      }
+      navigate(`/projects/${projectId}`)
     },
     onError: (err) => {
       toast.error(err.friendlyMessage || 'Something went wrong. Please try again.')

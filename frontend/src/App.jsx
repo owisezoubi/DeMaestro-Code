@@ -4,6 +4,7 @@ import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
 import NewProject from './pages/NewProject'
+import ProjectChat from './pages/ProjectChat'
 import ProtectedRoute from './components/ProtectedRoute'
 
 export default function App() {
@@ -24,6 +25,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <NewProject />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:id"
+        element={
+          <ProtectedRoute>
+            <ProjectChat />
           </ProtectedRoute>
         }
       />

@@ -76,7 +76,11 @@ export default function Dashboard() {
         ) : (
           <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {projects.map((p) => (
-              <li key={p.id} className="card hover:shadow-md transition-shadow">
+              <li
+                key={p.id}
+                className="card hover:shadow-md transition-shadow cursor-pointer"
+                onClick={() => navigate(`/projects/${p.id}`)}
+              >
                 <div className="flex items-start justify-between mb-2">
                   <FolderOpen className="w-5 h-5 text-primary-600" />
                   <StatusPill status={p.status} />

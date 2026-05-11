@@ -15,6 +15,9 @@ from app.services import firestore_service
 
 log = structlog.get_logger(__name__)
 
+_INITIAL_AMBIGUITY_CAP = 3
+_ROUND_CAP = {1: 2, 2: 1}
+
 
 # ---------- Structuring ----------
 
@@ -37,6 +40,16 @@ def _run_structuring(uid: str, project_id: str) -> None:
             return
 
         sr = gemini.structure_requirements(combined)
+
+        if len(sr.ambiguities) > _INITIAL_AMBIGUITY_CAP:
+            log.info(
+                "trimmed_initial_ambiguities",
+                uid=uid,
+                project_id=project_id,
+                original_count=len(sr.ambiguities),
+            )
+            sr = sr.model_copy(update={"ambiguities": sr.ambiguities[:_INITIAL_AMBIGUITY_CAP]})
+
         firestore_service.add_structured_requirements(uid, project_id, sr)
 
         next_status = (
@@ -78,8 +91,37 @@ def _run_apply_clarification(
             )
             return
 
+        new_round = firestore_service.increment_clarification_round(uid, project_id)
+
+        if new_round >= 3:
+            log.warning(
+                "forced_finish_after_three_rounds",
+                uid=uid,
+                project_id=project_id,
+                new_round=new_round,
+            )
+            updated = current.model_copy(
+                update={"ambiguities": [], "version": current.version + 1}
+            )
+            firestore_service.add_structured_requirements(uid, project_id, updated)
+            firestore_service.add_clarification_turn(uid, project_id, ambiguity_id, question, answer)
+            firestore_service.set_project_status(uid, project_id, ProjectStatus.awaiting_approval)
+            return
+
         clarification = ClarificationAnswer(question_id=ambiguity_id, answer=answer)
         updated = gemini.apply_clarifications(current, [clarification])
+
+        round_cap = _ROUND_CAP.get(new_round)
+        if round_cap is not None and len(updated.ambiguities) > round_cap:
+            log.info(
+                f"trimmed_clarification_round_{new_round}",
+                uid=uid,
+                project_id=project_id,
+                original_count=len(updated.ambiguities),
+                cap=round_cap,
+            )
+            updated = updated.model_copy(update={"ambiguities": updated.ambiguities[:round_cap]})
+
         firestore_service.add_structured_requirements(uid, project_id, updated)
         firestore_service.add_clarification_turn(uid, project_id, ambiguity_id, question, answer)
 

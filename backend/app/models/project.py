@@ -35,5 +35,6 @@ class ProjectMeta(BaseModel):
     name: str
     status: ProjectStatus = ProjectStatus.awaiting_input
     stack_choice: Optional[StackChoice] = None
+    clarification_round: int = 0
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None

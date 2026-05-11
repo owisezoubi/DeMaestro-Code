@@ -5,7 +5,24 @@ from unittest.mock import patch
 
 from app.models.project import ProjectStatus
 from app.models.raw_input import RawInputDoc, RawInputType
-from app.pipeline.orchestrator import kick_off_structuring
+from app.models.structured_requirements import (
+    AmbiguityFlag,
+    Entity,
+    FeatureRequirement,
+    StructuredRequirements,
+)
+from app.pipeline.orchestrator import apply_clarification_in_background, kick_off_structuring
+
+
+def _make_sr(ambiguities: list[AmbiguityFlag] | None = None, version: int = 1) -> StructuredRequirements:
+    return StructuredRequirements(
+        app_name="TestApp",
+        summary="A test application.",
+        entities=[Entity(name="User", description="A user", fields=["id", "email"])],
+        features=[FeatureRequirement(id="FR-01", description="Login", priority="must")],
+        ambiguities=ambiguities or [],
+        version=version,
+    )
 
 
 def test_kick_off_structuring_in_mock_mode_does_not_crash(monkeypatch):
@@ -34,3 +51,74 @@ def test_kick_off_structuring_in_mock_mode_does_not_crash(monkeypatch):
         assert statuses[1] in (ProjectStatus.clarifying, ProjectStatus.awaiting_approval)
 
         mock_add_sr.assert_called_once()
+
+
+def test_force_finish_after_three_rounds_clears_remaining_ambiguities():
+    current_sr = _make_sr(
+        ambiguities=[
+            AmbiguityFlag(
+                id="AMB-01",
+                field_path="auth.method",
+                reason="Auth method unclear",
+                suggested_options=["email/password", "Google OAuth"],
+            ),
+            AmbiguityFlag(
+                id="AMB-02",
+                field_path="entities.User.fields",
+                reason="Missing user fields",
+                suggested_options=["name + role", "name only"],
+            ),
+        ],
+        version=3,
+    )
+
+    with (
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=current_sr),
+        patch("app.services.firestore_service.increment_clarification_round", return_value=3),
+        patch("app.services.firestore_service.add_structured_requirements") as mock_add_sr,
+        patch("app.services.firestore_service.add_clarification_turn"),
+        patch("app.services.firestore_service.set_project_status") as mock_set_status,
+        patch("app.ai.gemini.client.apply_clarifications") as mock_gemini,
+    ):
+        apply_clarification_in_background("uid123", "proj456", "AMB-01", "Auth method?", "email/password")
+        time.sleep(0.5)
+
+        mock_gemini.assert_not_called()
+
+        mock_add_sr.assert_called_once()
+        saved_sr = mock_add_sr.call_args[0][2]
+        assert saved_sr.ambiguities == []
+
+        statuses = [call.args[2] for call in mock_set_status.call_args_list]
+        assert ProjectStatus.awaiting_approval in statuses
+
+
+def test_round_1_trims_to_max_2_ambiguities():
+    current_sr = _make_sr(version=1)
+
+    gemini_result = _make_sr(
+        ambiguities=[
+            AmbiguityFlag(id="AMB-01", field_path="auth.method", reason="Unclear", suggested_options=["email/password", "OAuth"]),
+            AmbiguityFlag(id="AMB-02", field_path="entities.Post.fields", reason="Missing fields", suggested_options=["title+body", "title only"]),
+            AmbiguityFlag(id="AMB-03", field_path="features.roles", reason="Role count unclear", suggested_options=["single role", "admin + user"]),
+            AmbiguityFlag(id="AMB-04", field_path="entities.Comment.fields", reason="Comment fields missing", suggested_options=["body only", "body + author"]),
+        ],
+        version=2,
+    )
+
+    with (
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=current_sr),
+        patch("app.services.firestore_service.increment_clarification_round", return_value=1),
+        patch("app.services.firestore_service.add_structured_requirements") as mock_add_sr,
+        patch("app.services.firestore_service.add_clarification_turn"),
+        patch("app.services.firestore_service.set_project_status"),
+        patch("app.ai.gemini.client.apply_clarifications", return_value=gemini_result),
+    ):
+        apply_clarification_in_background("uid123", "proj456", "AMB-01", "Auth method?", "email/password")
+        time.sleep(0.5)
+
+        mock_add_sr.assert_called_once()
+        saved_sr = mock_add_sr.call_args[0][2]
+        assert len(saved_sr.ambiguities) == 2
+        assert saved_sr.ambiguities[0].id == "AMB-01"
+        assert saved_sr.ambiguities[1].id == "AMB-02"

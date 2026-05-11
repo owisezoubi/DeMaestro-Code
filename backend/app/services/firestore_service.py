@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from google.cloud import firestore as _fs
+
 from app.auth.firebase_admin import get_firestore_client
 from app.models.project import ProjectMeta, ProjectStatus
 from app.models.raw_input import RawInputDoc
@@ -120,6 +122,15 @@ def list_raw_inputs(uid: str, project_id: str) -> list[RawInputDoc]:
 def set_project_status(uid: str, project_id: str, status: ProjectStatus) -> None:
     """Convenience wrapper that stamps the project with a new status."""
     update_project(uid, project_id, {"status": status})
+
+
+def increment_clarification_round(uid: str, project_id: str) -> int:
+    """Atomically increment the project's clarification_round counter.
+    Returns the new value."""
+    ref = _project_doc(uid, project_id)
+    ref.update({"clarification_round": _fs.Increment(1)})
+    snap = ref.get()
+    return snap.to_dict().get("clarification_round", 0)
 
 
 # ---------- Structured requirements ----------

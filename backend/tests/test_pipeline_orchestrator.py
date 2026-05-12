@@ -8,10 +8,22 @@ from app.models.raw_input import RawInputDoc, RawInputType
 from app.models.structured_requirements import (
     AmbiguityFlag,
     Entity,
-    FeatureRequirement,
+    RequirementCategory,
     StructuredRequirements,
+    UserRequirement,
 )
 from app.pipeline.orchestrator import apply_clarification_in_background, kick_off_structuring
+
+
+def _make_ur(uid: str = "UR-01") -> UserRequirement:
+    return UserRequirement(
+        id=uid,
+        statement="A logged-in user can log in with valid credentials.",
+        rationale="Authentication is required for all user-facing features.",
+        acceptance_criteria=["POST /auth/login with valid credentials returns 200"],
+        priority="must",
+        category=RequirementCategory.functional,
+    )
 
 
 def _make_sr(ambiguities: list[AmbiguityFlag] | None = None, version: int = 1) -> StructuredRequirements:
@@ -19,7 +31,7 @@ def _make_sr(ambiguities: list[AmbiguityFlag] | None = None, version: int = 1) -
         app_name="TestApp",
         summary="A test application.",
         entities=[Entity(name="User", description="A user", fields=["id", "email"])],
-        features=[FeatureRequirement(id="FR-01", description="Login", priority="must")],
+        user_requirements=[_make_ur()],
         ambiguities=ambiguities or [],
         version=version,
     )
@@ -100,7 +112,7 @@ def test_round_1_trims_to_max_2_ambiguities():
         ambiguities=[
             AmbiguityFlag(id="AMB-01", field_path="auth.method", reason="Unclear", suggested_options=["email/password", "OAuth"]),
             AmbiguityFlag(id="AMB-02", field_path="entities.Post.fields", reason="Missing fields", suggested_options=["title+body", "title only"]),
-            AmbiguityFlag(id="AMB-03", field_path="features.roles", reason="Role count unclear", suggested_options=["single role", "admin + user"]),
+            AmbiguityFlag(id="AMB-03", field_path="user_requirements.roles", reason="Role count unclear", suggested_options=["single role", "admin + user"]),
             AmbiguityFlag(id="AMB-04", field_path="entities.Comment.fields", reason="Comment fields missing", suggested_options=["body only", "body + author"]),
         ],
         version=2,

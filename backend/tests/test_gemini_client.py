@@ -6,9 +6,21 @@ from app.models.structured_requirements import (
     AmbiguityFlag,
     ClarificationAnswer,
     Entity,
-    FeatureRequirement,
+    RequirementCategory,
     StructuredRequirements,
+    UserRequirement,
 )
+
+
+def _make_ur(uid: str = "UR-01") -> UserRequirement:
+    return UserRequirement(
+        id=uid,
+        statement="A logged-in user can log in with valid credentials.",
+        rationale="Authentication is required for all user-facing features.",
+        acceptance_criteria=["POST /auth/login with valid credentials returns 200"],
+        priority="must",
+        category=RequirementCategory.functional,
+    )
 
 
 def test_structure_requirements_mock_returns_valid_model(monkeypatch):
@@ -16,7 +28,7 @@ def test_structure_requirements_mock_returns_valid_model(monkeypatch):
     result = structure_requirements("I want a todo app")
     assert isinstance(result, StructuredRequirements)
     assert len(result.entities) >= 1
-    assert len(result.features) >= 1
+    assert len(result.user_requirements) >= 1
 
 
 def test_apply_clarifications_mock_bumps_version_and_clears_ambiguities(monkeypatch):
@@ -25,7 +37,7 @@ def test_apply_clarifications_mock_bumps_version_and_clears_ambiguities(monkeypa
         app_name="Test",
         summary="A test application for validating the clarification pipeline.",
         entities=[Entity(name="User", description="A user of the system", fields=["id", "name"])],
-        features=[FeatureRequirement(id="FR-01", description="User can log in", priority="must")],
+        user_requirements=[_make_ur()],
         ambiguities=[
             AmbiguityFlag(
                 id="AMB-01",

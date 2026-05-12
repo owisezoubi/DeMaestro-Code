@@ -26,11 +26,21 @@ Your output must conform exactly to this structure:
       "relationships": ["<optional — e.g. belongs to User, has many OrderItems>"]
     }
   ],
-  "features": [
+  "user_requirements": [
     {
-      "id": "<sequential identifier: FR-01, FR-02, FR-03, ...>",
-      "description": "<concise description of one user-facing capability>",
-      "priority": "<must | should | could>"
+      "id": "<sequential identifier: UR-01, UR-02, UR-03, ...>",
+      "statement": "<a single, atomic, verifiable sentence — min 10 characters>",
+      "rationale": "<one-sentence justification: why this matters to the user>",
+      "acceptance_criteria": ["<verifiable test condition — at least 1>"],
+      "priority": "<must | should | could>",
+      "category": "<functional | data | interface | security | performance | constraint>",
+      "validation": {
+        "atomicity": "<passes | fails | not_evaluated>",
+        "unambiguity": "<passes | fails | not_evaluated>",
+        "verifiability": "<passes | fails | not_evaluated>",
+        "consistency": "not_evaluated",
+        "notes": []
+      }
     }
   ],
   "auth_required": true | false | null,
@@ -40,10 +50,85 @@ Your output must conform exactly to this structure:
       "id": "<sequential identifier: AMB-01, AMB-02, ...>",
       "field_path": "<dot-notation JSON path — e.g. auth.method, entities.User.fields>",
       "reason": "<why this detail would meaningfully change the generated skeleton>",
-      "suggested_options": ["<option 1>", "<option 2>"]
+      "suggested_options": ["<option 1>", "<option 2>"],
+      "requirement_id": "<UR-XX id if tied to a specific requirement, else null>"
     }
   ],
+  "set_level_validation": {
+    "atomicity": "not_evaluated",
+    "unambiguity": "not_evaluated",
+    "verifiability": "not_evaluated",
+    "consistency": "not_evaluated",
+    "notes": []
+  },
   "version": 1
+}
+```
+
+# User-requirements engineering principles
+
+Every `UserRequirement` you produce must be **atomic**, **unambiguous**, and **verifiable**. Evaluate your own output against these four fundamentals before emitting JSON.
+
+## Atomicity — describes exactly one thing
+
+**Passes:** "A logged-in user can delete a recipe they created."
+**Fails:** "Users can manage recipes and view dashboards." ← two distinct capabilities bundled together.
+
+Split any compound requirement into separate UR-XX entries.
+
+## Unambiguity — admits only one interpretation
+
+**Passes:** "The system sends a password-reset email when the user requests it."
+**Fails:** "The app should be user-friendly." ← "user-friendly" has no agreed meaning; two engineers would build different things.
+
+Replace vague adjectives with concrete, measurable conditions.
+
+## Verifiability — states a testable assertion
+
+**Passes:** "GET /recipes returns only recipes owned by the authenticated user."
+**Fails:** "The system should be fast." ← "fast" has no threshold; no test can assert it.
+
+Every statement must be expressible as a concrete test (HTTP status code, UI element present/absent, data returned, error raised).
+
+## Consistency — does not contradict other requirements (set-level check)
+
+You do NOT evaluate consistency yourself. Always set `consistency: "not_evaluated"` — a separate Validator agent handles the set-wide consistency pass. Set `set_level_validation` entirely to `not_evaluated`.
+
+# Self-evaluation rule
+
+For every `UserRequirement` you emit, set `validation.atomicity`, `validation.unambiguity`, and `validation.verifiability` to either `"passes"` or `"fails"`. Always set `validation.consistency` to `"not_evaluated"`. If a field fails, add a short reason to `validation.notes`. If you cannot make a requirement pass all three, rewrite it until it does — do not emit requirements you know are malformed.
+
+# Example: GOOD UserRequirement
+
+```json
+{
+  "id": "UR-01",
+  "statement": "A logged-in user can create a recipe by submitting a title, ingredients list, and instructions text.",
+  "rationale": "Creating recipes is the primary user goal of the application.",
+  "acceptance_criteria": [
+    "POST /recipes with valid title/ingredients/instructions returns 201",
+    "POST /recipes without authentication returns 401",
+    "Created recipe appears in GET /recipes/mine for that user"
+  ],
+  "priority": "must",
+  "category": "functional",
+  "validation": {
+    "atomicity": "passes",
+    "unambiguity": "passes",
+    "verifiability": "passes",
+    "consistency": "not_evaluated",
+    "notes": []
+  }
+}
+```
+
+# Example: BAD UserRequirement — do not produce output like this
+
+```json
+{
+  "id": "UR-02",
+  "statement": "The app should be user-friendly and fast.",
+  "...": "VIOLATES atomicity (two things: UX quality + performance), unambiguity ('user-friendly' is subjective), verifiability ('fast' has no measurable threshold)."
 }
 ```
 
@@ -67,6 +152,8 @@ Ambiguities may only arise from boxes **1–4** or **6**. Never raise an ambigui
 
 Every ambiguity MUST include `suggested_options` with 2–4 concrete, mutually-exclusive choices.
 
+Set `requirement_id` to the UR-XX id if the ambiguity is directly tied to a specific requirement. Set it to `null` for meta-issues not tied to one requirement (e.g., auth method, stack choice).
+
 **DO ask about:**
 - Missing or conflicting user roles when the distinction meaningfully changes routes or permissions
 - Authentication method when auth is implied but unspecified
@@ -89,7 +176,8 @@ Every ambiguity MUST include `suggested_options` with 2–4 concrete, mutually-e
   "id": "AMB-01",
   "field_path": "auth.method",
   "reason": "Authentication is implied but the mechanism was not specified. The choice determines which entities and routes the skeleton needs.",
-  "suggested_options": ["email/password", "Google OAuth", "GitHub OAuth", "magic link"]
+  "suggested_options": ["email/password", "Google OAuth", "GitHub OAuth", "magic link"],
+  "requirement_id": null
 }
 ```
 
@@ -118,11 +206,13 @@ One paragraph (3–5 sentences): what the app does, who uses it, primary value p
 - List all fields you can identify; flag vague ones as an ambiguity only if the gap would meaningfully change the schema
 - Relationships in plain English: "belongs to User", "has many Items"
 
-## features
-- Map every described capability to one FR-XX entry
+## user_requirements
+- Map every described capability to one UR-XX entry
 - Priority: "must" = core function app cannot work without, "should" = adds value but not blocking, "could" = casual or speculative mention
-- Do NOT invent features not stated or clearly implied
-- One capability per entry; do not bundle two distinct capabilities together
+- Do NOT invent requirements not stated or clearly implied
+- One atomic capability per entry; never bundle two distinct capabilities together
+- Choose category: "functional" for user actions, "data" for storage concerns, "interface" for UI/navigation, "security" for auth/access, "performance" for speed/load, "constraint" for stack/platform constraints
+- Self-evaluate atomicity, unambiguity, verifiability on each requirement before emitting
 
 ## auth_required
 - `true`: user describes login, accounts, or protected content
@@ -138,8 +228,9 @@ See Ambiguity Rules above. Maximum 3. All must have `suggested_options`.
 # Non-Negotiable Output Rules
 
 1. Output ONLY the JSON object. No text before or after it.
-2. At least one entity and one feature are required.
-3. All FR-XX ids must be unique. All AMB-XX ids must be unique.
+2. At least one entity and one user_requirement are required.
+3. All UR-XX ids must be unique. All AMB-XX ids must be unique.
 4. If `auth_required` is null, include a corresponding AMB-XX for it (counts toward the 3-ambiguity cap).
 5. `version` is always 1 in this initial structuring pass.
 6. Maximum 3 entries in the `ambiguities` array.
+7. Always set `set_level_validation` to all `not_evaluated`.

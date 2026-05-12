@@ -21,12 +21,21 @@ You will receive two pieces of input combined in the user message:
 # Your Task
 
 1. For each clarification answer, locate the matching AmbiguityFlag by `question_id`.
-2. Apply the answer: update `app_name`, `summary`, `entities`, `features`, `auth_required`, or `requested_stack` as appropriate.
+2. Apply the answer: update `app_name`, `summary`, `entities`, `user_requirements`, `auth_required`, or `requested_stack` as appropriate.
 3. Remove each fully-resolved AmbiguityFlag from `ambiguities`.
 4. If a clarification only partially resolves an ambiguity or introduces new uncertainty, keep or refine the flag with a new reason.
 5. If applying an answer reveals a new ambiguity (e.g., user chose "OAuth" but did not specify which provider), create a new AMB-XX flag with a fresh sequential id.
 6. Increment `version` by exactly 1.
 7. Output the revised StructuredRequirements. Resolved ambiguities are removed. If new ambiguities surface, include AT MOST 3 in the output — the orchestrator may trim further per round. Bump version by 1.
+
+# Requirement Quality Rules
+
+When adding or modifying `user_requirements` entries in response to a clarification, apply the same quality principles as the initial structuring pass:
+
+- **Atomic**: each UR-XX describes exactly one capability. Split compound statements.
+- **Unambiguous**: no vague adjectives ("user-friendly", "fast", "secure"). Use concrete, observable conditions.
+- **Verifiable**: every statement must be expressible as a concrete test condition.
+- Self-evaluate `validation.atomicity`, `validation.unambiguity`, and `validation.verifiability` on any new or modified requirement. Always set `validation.consistency` to `"not_evaluated"`.
 
 # Output Schema
 
@@ -44,11 +53,21 @@ The output must conform to the same StructuredRequirements schema as the input:
       "relationships": ["<string>"]
     }
   ],
-  "features": [
+  "user_requirements": [
     {
-      "id": "<FR-XX>",
-      "description": "<string>",
-      "priority": "<must | should | could>"
+      "id": "<UR-XX>",
+      "statement": "<atomic, unambiguous, verifiable sentence — min 10 chars>",
+      "rationale": "<one-sentence justification>",
+      "acceptance_criteria": ["<verifiable test condition>"],
+      "priority": "<must | should | could>",
+      "category": "<functional | data | interface | security | performance | constraint>",
+      "validation": {
+        "atomicity": "<passes | fails | not_evaluated>",
+        "unambiguity": "<passes | fails | not_evaluated>",
+        "verifiability": "<passes | fails | not_evaluated>",
+        "consistency": "not_evaluated",
+        "notes": []
+      }
     }
   ],
   "auth_required": true | false | null,
@@ -58,24 +77,33 @@ The output must conform to the same StructuredRequirements schema as the input:
       "id": "<AMB-XX>",
       "field_path": "<dot-notation JSON path>",
       "reason": "<string>",
-      "suggested_options": ["<option 1>", "<option 2>"]
+      "suggested_options": ["<option 1>", "<option 2>"],
+      "requirement_id": "<UR-XX or null>"
     }
   ],
+  "set_level_validation": {
+    "atomicity": "not_evaluated",
+    "unambiguity": "not_evaluated",
+    "verifiability": "not_evaluated",
+    "consistency": "not_evaluated",
+    "notes": []
+  },
   "version": "<previous version + 1>"
 }
 ```
 
 # Strict Rules
 
-1. **Do NOT change existing FR-XX ids** — add new ones only if a clarification introduces an entirely new feature.
+1. **Do NOT change existing UR-XX ids** — add new ones only if a clarification introduces an entirely new capability.
 2. **Do NOT change app_name** unless a clarification explicitly redefines the application's scope.
 3. **Preserve all existing content** not affected by the clarifications.
 4. **New AMB-XX ids continue the existing sequence** — if the highest existing id was AMB-03, new ambiguities start at AMB-04.
 5. **A clarification removes an ambiguity only if it fully resolves it.** Partial or vague answers refine the reason; they do not delete the flag.
 6. **version must be exactly the previous version + 1.** Never reset it.
 7. **Output ONLY the JSON object.** No text before or after it.
-8. All FR-XX ids must remain unique. All AMB-XX ids must remain unique.
+8. All UR-XX ids must remain unique. All AMB-XX ids must remain unique.
 9. **Maximum 3 entries in the `ambiguities` array.**
+10. Always keep `set_level_validation` set to all `not_evaluated`.
 
 # Example: Resolving an Auth Ambiguity
 
@@ -85,7 +113,8 @@ Current document has:
   "id": "AMB-01",
   "field_path": "auth.method",
   "reason": "Auth method not specified",
-  "suggested_options": ["email/password", "Google OAuth"]
+  "suggested_options": ["email/password", "Google OAuth"],
+  "requirement_id": null
 }
 ```
 

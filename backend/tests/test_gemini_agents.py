@@ -1,6 +1,7 @@
 """Tests for Gemini agents (W3.5-Patch 2, 3 & 4). No real API calls are made."""
-from app.ai.gemini.agents import AnalystAgent, ClarificationAgent, SummaryAgent, BlueprintAgent, ValidatorAgent
+from app.ai.gemini.agents import AnalystAgent, ClarificationAgent, CompletenessAgent, SummaryAgent, BlueprintAgent, ValidatorAgent
 from app.ai.gemini.agents.blueprint import BlueprintResponse
+from app.ai.gemini.agents.completeness import CompletenessResponse
 from app.ai.gemini.agents.coordinator import RequirementsCoordinator
 from app.models.structured_requirements import (
     AmbiguityFlag,
@@ -227,7 +228,7 @@ def test_coordinator_analyze_runs_analyst_then_validator(monkeypatch):
 
 # ── SummaryAgent ──────────────────────────────────────────────────────────────
 
-def test_summary_agent_mock_mode_includes_project_name_and_categories(monkeypatch):
+def test_summary_agent_mock_mode_includes_project_name_and_sections(monkeypatch):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "mock_ai", True)
@@ -236,19 +237,20 @@ def test_summary_agent_mock_mode_includes_project_name_and_categories(monkeypatc
     result = agent.generate_summary(sr)
     assert isinstance(result, str)
     assert "TestApp" in result
-    assert "functional" in result.lower()
+    # New narrative format has friendly section headings
+    assert "Who uses it" in result or "What can" in result
 
 
-def test_summary_agent_generates_markdown_containing_requirement_statements(monkeypatch):
+def test_summary_agent_generates_friendly_narrative_markdown(monkeypatch):
     from app.config import settings as app_settings
 
     monkeypatch.setattr(app_settings, "mock_ai", True)
     sr = _make_sr()
     agent = SummaryAgent()
     result = agent.generate_summary(sr)
-    # Every requirement statement should appear in the summary.
-    for r in sr.user_requirements:
-        assert r.statement in result
+    # Narrative mock should be non-empty markdown with the app name as title
+    assert result.startswith(f"# {sr.app_name}")
+    assert len(result) > 100
 
 
 # ── BlueprintAgent ────────────────────────────────────────────────────────────
@@ -298,3 +300,99 @@ def test_coordinator_generate_blueprint_delegates_to_blueprint_agent(monkeypatch
     assert len(result.database_schema) >= 1
     assert len(result.api_routes) >= 1
     assert len(result.frontend_pages) >= 1
+
+
+# ── CompletenessAgent ─────────────────────────────────────────────────────────
+
+def test_completeness_mock_mode_returns_no_missing_aspects(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    agent = CompletenessAgent()
+    result = agent.validate(sr)
+    # Mock mode: no aspects flagged, no new ambiguities added.
+    assert isinstance(result, StructuredRequirements)
+    assert len(result.ambiguities) == len(sr.ambiguities)
+
+
+def test_completeness_algorithmic_pass_detects_missing_auth_aspect(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    # A requirement that mentions nothing about auth.
+    sr = _make_sr(
+        requirements=[
+            _make_ur(
+                statement="A user can view a list of workout entries.",
+                acceptance_criteria=["GET /workouts returns 200 with workout list"],
+            )
+        ]
+    )
+    agent = CompletenessAgent()
+    agent.validate(sr)
+    state = agent.state
+    # The algorithmic pass should not find auth keywords.
+    assert state["num_aspects_found"] < len(["user_auth", "data_persistence", "user_management",
+                                              "search_filter", "reporting", "notifications",
+                                              "export_sharing", "ui_branding"])
+
+
+def test_completeness_algorithmic_pass_detects_missing_data_aspect(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    # A requirement with no storage/persistence keywords.
+    sr = _make_sr(
+        requirements=[
+            _make_ur(
+                statement="A user can search for friends by name.",
+                acceptance_criteria=["GET /friends?q=name returns matching users"],
+            )
+        ]
+    )
+    agent = CompletenessAgent()
+    agent.validate(sr)
+    state = agent.state
+    assert state["num_aspects_checked"] == 8
+
+
+def test_completeness_creates_ambiguity_flags_for_missing_aspects(monkeypatch):
+    from unittest.mock import patch
+    from app.config import settings as app_settings
+    from app.ai.gemini.agents.completeness import MissingAspect
+
+    monkeypatch.setattr(app_settings, "mock_ai", False)
+
+    # Patch _call_gemini to return a CompletenessResponse with one missing aspect.
+    fake_response = CompletenessResponse(
+        missing_aspects=[
+            MissingAspect(
+                aspect="user authentication",
+                description="Users need a way to log in.",
+                suggested_category="security",
+                examples=["Email + password", "Google login", "No login needed"],
+            )
+        ],
+        is_complete=False,
+    )
+    sr = _make_sr()
+    agent = CompletenessAgent()
+    with patch.object(agent, "_call_gemini", return_value=fake_response):
+        with patch.object(agent, "_load_prompt", return_value="mock prompt"):
+            result = agent.validate(sr)
+
+    assert len(result.ambiguities) == 1
+    assert result.ambiguities[0].id == "AMB-COMP-1"
+    assert "user authentication" in result.ambiguities[0].reason
+
+
+def test_coordinator_analyze_runs_completeness_after_validator(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    coordinator = RequirementsCoordinator()
+    result = coordinator.analyze("I want a simple todo app with tasks and users")
+    assert isinstance(result, StructuredRequirements)
+    # Completeness ran: state is tracked on the agent.
+    assert coordinator.completeness.state.get("num_aspects_checked") == 8

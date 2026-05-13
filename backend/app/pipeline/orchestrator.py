@@ -18,6 +18,39 @@ _INITIAL_AMBIGUITY_CAP = 3
 _ROUND_CAP = {1: 2, 2: 1}
 
 
+# ---------- Summary + Blueprint generation ----------
+
+def _generate_and_store_summary_blueprint(uid: str, project_id: str) -> None:
+    """Generate summary + blueprint and write them into the project doc."""
+    try:
+        log.info("generate_summary_blueprint.start", project_id=project_id)
+        sr = firestore_service.get_latest_structured_requirements(uid, project_id)
+        if sr is None:
+            log.error("generate_summary_blueprint.no_sr", project_id=project_id)
+            return
+
+        coordinator = RequirementsCoordinator()
+        summary = coordinator.generate_summary(sr)
+        blueprint_obj = coordinator.generate_blueprint(sr)
+
+        firestore_service.update_project(uid, project_id, {
+            "summary": summary,
+            "blueprint": blueprint_obj.model_dump(),
+        })
+        log.info(
+            "generate_summary_blueprint.done",
+            project_id=project_id,
+            summary_length=len(summary),
+            num_tables=len(blueprint_obj.database_schema),
+        )
+    except Exception as exc:
+        log.error(
+            "generate_summary_blueprint.error",
+            project_id=project_id,
+            error=str(exc),
+        )
+
+
 # ---------- Structuring ----------
 
 def _run_structuring(uid: str, project_id: str) -> None:
@@ -56,6 +89,10 @@ def _run_structuring(uid: str, project_id: str) -> None:
             ProjectStatus.awaiting_approval if not sr.ambiguities else ProjectStatus.clarifying
         )
         firestore_service.set_project_status(uid, project_id, next_status)
+
+        # Pre-generate summary + blueprint if no clarifications are needed.
+        if not sr.ambiguities:
+            _generate_and_store_summary_blueprint(uid, project_id)
 
     except Exception as exc:
         log.error(
@@ -106,6 +143,8 @@ def _run_apply_clarification(
             firestore_service.add_structured_requirements(uid, project_id, updated)
             firestore_service.add_clarification_turn(uid, project_id, ambiguity_id, question, answer)
             firestore_service.set_project_status(uid, project_id, ProjectStatus.awaiting_approval)
+            # Clarifications are done — generate summary + blueprint now.
+            _generate_and_store_summary_blueprint(uid, project_id)
             return
 
         coordinator = RequirementsCoordinator()
@@ -129,6 +168,11 @@ def _run_apply_clarification(
             ProjectStatus.awaiting_approval if not updated.ambiguities else ProjectStatus.clarifying
         )
         firestore_service.set_project_status(uid, project_id, next_status)
+
+        # Clarifications are done — generate summary + blueprint immediately.
+        if not updated.ambiguities:
+            log.info("clarifications.complete", uid=uid, project_id=project_id)
+            _generate_and_store_summary_blueprint(uid, project_id)
 
     except Exception as exc:
         log.error(

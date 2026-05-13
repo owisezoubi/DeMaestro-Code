@@ -48,6 +48,14 @@ Your output must conform exactly to this schema:
 6. **If there are no issues, output `{"issues": []}`.**
 7. Do not repeat issues already evident from the validation fields in the input JSON (those were caught algorithmically).
 
+# Language Rules for Issue Descriptions
+
+Write every `description` as a conversational, friendly clarification request directed at the user — not a technical observation. Use this pattern: **"I want to make sure I understand [X] correctly. Can you clarify…"**
+
+Never use these words in a `description`: schema, database, API, endpoint, field, object, JSON, code, implementation, architecture, stack, framework, enum.
+
+The `suggested_fix` may use plain technical shorthand (it is for internal use), but prefer plain English there too when possible.
+
 # Examples
 
 ## Good: Consistency error (cross-cutting)
@@ -56,8 +64,8 @@ Your output must conform exactly to this schema:
   "requirement_id": "set",
   "fundamental": "consistency",
   "severity": "error",
-  "description": "UR-03 states users can view all recipes while UR-07 states users can only view their own recipes — these are mutually exclusive.",
-  "suggested_fix": "Clarify whether the app has a shared recipe feed or per-user private collections."
+  "description": "I want to make sure I understand UR-03 and UR-07 correctly. Can you clarify whether all users should be able to see each other's recipes, or only their own? Both can't be true at the same time.",
+  "suggested_fix": "Decide whether the app has a shared recipe feed or per-user private collections."
 }
 ```
 
@@ -67,8 +75,8 @@ Your output must conform exactly to this schema:
   "requirement_id": "UR-05",
   "fundamental": "unambiguity",
   "severity": "error",
-  "description": "The statement 'the system responds promptly' has no measurable threshold — two engineers would implement different timeouts.",
-  "suggested_fix": "Replace with a concrete bound, e.g., 'the API responds within 500 ms for 95% of requests.'"
+  "description": "I want to make sure I understand what 'promptly' means in UR-05. Can you give me a sense of how fast the system should respond? Without a specific time in mind, this is hard to build to.",
+  "suggested_fix": "Replace with a concrete bound, e.g., 'the system responds within 2 seconds for all user actions.'"
 }
 ```
 
@@ -82,3 +90,15 @@ Your output must conform exactly to this schema:
   "suggested_fix": null
 }
 ```
+
+## Bad: Do NOT produce this (technical observation language)
+```json
+{
+  "requirement_id": "set",
+  "fundamental": "consistency",
+  "severity": "error",
+  "description": "UR-03 states users can view all recipes while UR-07 states users can only view their own recipes — these are mutually exclusive.",
+  "suggested_fix": "Clarify whether the app has a shared recipe feed or per-user private collections."
+}
+```
+*Why it's bad: reads like a technical spec review, not a friendly question to the user. Rephrase as "I want to make sure I understand… Can you clarify…"*

@@ -27,28 +27,28 @@ class SummaryAgent(GeminiAgent):
         return result
 
     def _build_mock_summary(self, sr: StructuredRequirements) -> str:
-        category_counts: dict[str, int] = {}
-        for r in sr.user_requirements:
-            cat = r.category.value
-            category_counts[cat] = category_counts.get(cat, 0) + 1
+        return f"""# {sr.app_name}: Your Personal Fitness Companion
 
-        lines = [
-            f"# {sr.app_name}",
-            "",
-            sr.summary,
-            "",
-            f"**Total Requirements:** {len(sr.user_requirements)}",
-            "",
-            "## Requirements by Category",
-            "",
-        ]
-        for cat, count in sorted(category_counts.items()):
-            lines.append(f"- **{cat}**: {count}")
-        lines += ["", "## All Requirements", ""]
-        for r in sr.user_requirements:
-            lines.append(f"- {r.statement}")
+FitTrack is a simple app that helps you track your workouts, see how you're improving over time, and stay motivated alongside friends — all in one place.
 
-        return "\n".join(lines)
+## Who uses it?
+
+- People who want to get fit or stay active
+- Athletes training for a specific goal
+- Friends who like to motivate each other
+
+## What can users do?
+
+- User can log a new workout — just pick the type, duration, and how hard it felt
+- User can see colorful charts showing how their fitness has improved week by week
+- User can compare their progress with friends to stay motivated
+- User can set personal fitness goals and get reminders to keep on track
+- User can export their workout history to share with a personal trainer
+- User can browse their full workout history to see how far they've come
+
+## Why does this matter?
+
+Sticking to a fitness routine is much easier when you can actually see your progress and have friends cheering you on. {sr.app_name} makes all of that effortless and even a little fun."""
 
     def process(self, sr: StructuredRequirements) -> str:
         return self.generate_summary(sr)

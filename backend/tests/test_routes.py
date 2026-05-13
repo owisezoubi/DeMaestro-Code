@@ -88,39 +88,32 @@ client = TestClient(app)
 
 
 def test_post_approve_updates_project_status_to_approved_and_stores_summary_blueprint():
-    project = ProjectMeta(id="proj123", name="TestApp", status=ProjectStatus.awaiting_approval)
-    sr = _make_sr()
+    # summary + blueprint are pre-generated (by the orchestrator after clarifications complete).
     blueprint = _make_blueprint()
-    summary_text = "# TestApp\n\nA test app."
+    project = ProjectMeta(
+        id="proj123",
+        name="TestApp",
+        status=ProjectStatus.awaiting_approval,
+        summary="# TestApp\n\nA test app.",
+        blueprint=blueprint.model_dump(),
+    )
 
     with (
         patch("app.services.firestore_service.get_project", return_value=project),
-        patch(
-            "app.services.firestore_service.get_latest_structured_requirements",
-            return_value=sr,
-        ),
         patch("app.services.firestore_service.update_project") as mock_update,
-        patch(
-            "app.ai.gemini.agents.coordinator.RequirementsCoordinator.generate_summary",
-            return_value=summary_text,
-        ),
-        patch(
-            "app.ai.gemini.agents.coordinator.RequirementsCoordinator.generate_blueprint",
-            return_value=blueprint,
-        ),
     ):
         r = client.post("/projects/proj123/approve")
 
     assert r.status_code == 200
     data = r.json()
     assert data["project_id"] == "proj123"
-    assert data["summary"] == summary_text
-    assert "blueprint" in data
     assert "approved_at" in data
     mock_update.assert_called_once()
-    # Verify status was set to approved in the update call.
+    # Verify only status + approved_at are written (not re-generating summary/blueprint).
     update_fields = mock_update.call_args[0][2]
     assert update_fields["status"] == ProjectStatus.approved
+    assert "summary" not in update_fields
+    assert "blueprint" not in update_fields
 
 
 def test_post_approve_requires_project_status_structured():
@@ -133,26 +126,30 @@ def test_post_approve_requires_project_status_structured():
     assert "clarifying" in r.json()["detail"]
 
 
-def test_post_approve_returns_isoformat_approved_at():
+def test_post_approve_rejects_if_summary_blueprint_not_yet_generated():
+    # Project is in awaiting_approval but summary/blueprint haven't been written yet.
     project = ProjectMeta(id="proj123", name="TestApp", status=ProjectStatus.awaiting_approval)
-    sr = _make_sr()
+
+    with patch("app.services.firestore_service.get_project", return_value=project):
+        r = client.post("/projects/proj123/approve")
+
+    assert r.status_code == 400
+    assert "still being generated" in r.json()["detail"]
+
+
+def test_post_approve_returns_isoformat_approved_at():
     blueprint = _make_blueprint()
+    project = ProjectMeta(
+        id="proj123",
+        name="TestApp",
+        status=ProjectStatus.awaiting_approval,
+        summary="# Test",
+        blueprint=blueprint.model_dump(),
+    )
 
     with (
         patch("app.services.firestore_service.get_project", return_value=project),
-        patch(
-            "app.services.firestore_service.get_latest_structured_requirements",
-            return_value=sr,
-        ),
         patch("app.services.firestore_service.update_project"),
-        patch(
-            "app.ai.gemini.agents.coordinator.RequirementsCoordinator.generate_summary",
-            return_value="# Test",
-        ),
-        patch(
-            "app.ai.gemini.agents.coordinator.RequirementsCoordinator.generate_blueprint",
-            return_value=blueprint,
-        ),
     ):
         r = client.post("/projects/proj123/approve")
 

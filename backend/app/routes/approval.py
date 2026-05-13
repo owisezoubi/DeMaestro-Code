@@ -1,9 +1,8 @@
-"""Approval endpoint — generates summary + blueprint and marks project approved."""
+"""Approval endpoint — marks a project as approved once summary + blueprint are ready."""
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, status
 
-from app.ai.gemini.agents.coordinator import RequirementsCoordinator
 from app.auth.dependencies import CurrentUser
 from app.models.project import ProjectStatus
 from app.services import firestore_service
@@ -13,7 +12,11 @@ router = APIRouter()
 
 @router.post("/{project_id}/approve")
 async def approve_project(project_id: str, user: CurrentUser) -> dict:
-    """Approve a project in awaiting_approval status and generate summary + blueprint."""
+    """Approve a project.
+
+    Requires the project to be in awaiting_approval status and to already have
+    a summary + blueprint (generated in the background after clarifications finish).
+    """
     project = firestore_service.get_project(user.uid, project_id)
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -24,16 +27,11 @@ async def approve_project(project_id: str, user: CurrentUser) -> dict:
             detail=f"Cannot approve project in status '{project.status.value}'",
         )
 
-    sr = firestore_service.get_latest_structured_requirements(user.uid, project_id)
-    if sr is None:
+    if not project.summary or not project.blueprint:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No structured requirements found for this project",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Summary and blueprint are still being generated. Please wait a moment.",
         )
-
-    coordinator = RequirementsCoordinator()
-    summary = coordinator.generate_summary(sr)
-    blueprint_obj = coordinator.generate_blueprint(sr)
 
     approved_at = datetime.now(timezone.utc)
     firestore_service.update_project(
@@ -41,15 +39,12 @@ async def approve_project(project_id: str, user: CurrentUser) -> dict:
         project_id,
         {
             "status": ProjectStatus.approved,
-            "summary": summary,
-            "blueprint": blueprint_obj.model_dump(),
             "approved_at": approved_at,
         },
     )
 
     return {
         "project_id": project_id,
-        "summary": summary,
-        "blueprint": blueprint_obj.model_dump(),
+        "status": ProjectStatus.approved,
         "approved_at": approved_at.isoformat(),
     }

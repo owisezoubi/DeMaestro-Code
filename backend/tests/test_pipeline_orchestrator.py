@@ -134,3 +134,49 @@ def test_round_1_trims_to_max_2_ambiguities():
         assert len(saved_sr.ambiguities) == 2
         assert saved_sr.ambiguities[0].id == "AMB-01"
         assert saved_sr.ambiguities[1].id == "AMB-02"
+
+
+def test_orchestrator_generates_summary_blueprint_when_clarifications_complete():
+    """When the last clarification is answered, summary+blueprint should be written to the project doc."""
+    current_sr = _make_sr(
+        ambiguities=[
+            AmbiguityFlag(
+                id="AMB-01",
+                field_path="auth.method",
+                reason="Auth method unclear",
+                suggested_options=["email/password", "Google OAuth"],
+            )
+        ],
+        version=1,
+    )
+    # Coordinator returns SR with no remaining ambiguities → clarifications complete.
+    resolved_sr = _make_sr(ambiguities=[], version=2)
+
+    with (
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=current_sr),
+        patch("app.services.firestore_service.increment_clarification_round", return_value=1),
+        patch("app.services.firestore_service.add_structured_requirements"),
+        patch("app.services.firestore_service.add_clarification_turn"),
+        patch("app.services.firestore_service.set_project_status"),
+        patch("app.ai.gemini.agents.coordinator.RequirementsCoordinator.apply_clarification", return_value=resolved_sr),
+        # _generate_and_store_summary_blueprint will fetch SR again, then call coordinator.
+        patch("app.services.firestore_service.update_project") as mock_update_project,
+        patch("app.ai.gemini.agents.coordinator.RequirementsCoordinator.generate_summary", return_value="Mock summary"),
+        patch("app.ai.gemini.agents.coordinator.RequirementsCoordinator.generate_blueprint") as mock_bp,
+    ):
+        from app.ai.gemini.agents.blueprint import BlueprintResponse, DatabaseTable, APIRoute, FrontendPage
+        mock_bp.return_value = BlueprintResponse(
+            database_schema=[DatabaseTable(name="Users", columns=[{"name": "id", "type": "uuid"}], description="Users")],
+            api_routes=[APIRoute(method="GET", path="/api/users", description="List users", request_schema="None", response_schema="list")],
+            frontend_pages=[FrontendPage(name="Dashboard", route="/", purpose="Main page", key_components=[])],
+            technology_stack_notes="",
+        )
+
+        apply_clarification_in_background("uid123", "proj456", "AMB-01", "Auth method?", "email/password")
+        time.sleep(0.5)
+
+        mock_update_project.assert_called_once()
+        update_args = mock_update_project.call_args[0][2]
+        assert "summary" in update_args
+        assert "blueprint" in update_args
+        assert update_args["summary"] == "Mock summary"

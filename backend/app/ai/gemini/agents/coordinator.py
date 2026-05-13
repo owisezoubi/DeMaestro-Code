@@ -6,6 +6,7 @@ import structlog
 from app.ai.gemini.agents.analyst import AnalystAgent
 from app.ai.gemini.agents.blueprint import BlueprintAgent, BlueprintResponse
 from app.ai.gemini.agents.clarification import ClarificationAgent
+from app.ai.gemini.agents.completeness import CompletenessAgent
 from app.ai.gemini.agents.summary import SummaryAgent
 from app.ai.gemini.agents.validator import ValidatorAgent
 from app.models.structured_requirements import AmbiguityFlag, StructuredRequirements
@@ -15,6 +16,7 @@ class RequirementsCoordinator:
     def __init__(self) -> None:
         self.analyst = AnalystAgent()
         self.validator = ValidatorAgent()
+        self.completeness = CompletenessAgent()
         self.clarification = ClarificationAgent()
         self.summary = SummaryAgent()
         self.blueprint = BlueprintAgent()
@@ -24,6 +26,7 @@ class RequirementsCoordinator:
         self.log.info("coordinator.analyze.start")
         sr = self.analyst.analyze(raw_input)
         sr = self.validator.validate(sr)
+        sr = self.completeness.validate(sr)
         self.log.info(
             "coordinator.analyze.done",
             num_requirements=len(sr.user_requirements),
@@ -40,6 +43,7 @@ class RequirementsCoordinator:
         self.log.info("coordinator.apply_clarification.start", ambiguity_id=ambiguity_id)
         updated = self.clarification.apply_answer(current, ambiguity_id, answer)
         updated = self.validator.validate(updated)
+        updated = self.completeness.validate(updated)
         self.log.info(
             "coordinator.apply_clarification.done",
             new_version=updated.version,

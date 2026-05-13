@@ -90,12 +90,12 @@ def test_force_finish_after_three_rounds_clears_remaining_ambiguities():
         patch("app.services.firestore_service.add_structured_requirements") as mock_add_sr,
         patch("app.services.firestore_service.add_clarification_turn"),
         patch("app.services.firestore_service.set_project_status") as mock_set_status,
-        patch("app.ai.gemini.client.apply_clarifications") as mock_gemini,
+        patch("app.ai.gemini.agents.coordinator.RequirementsCoordinator.apply_clarification") as mock_coordinator,
     ):
         apply_clarification_in_background("uid123", "proj456", "AMB-01", "Auth method?", "email/password")
         time.sleep(0.5)
 
-        mock_gemini.assert_not_called()
+        mock_coordinator.assert_not_called()
 
         mock_add_sr.assert_called_once()
         saved_sr = mock_add_sr.call_args[0][2]
@@ -124,7 +124,7 @@ def test_round_1_trims_to_max_2_ambiguities():
         patch("app.services.firestore_service.add_structured_requirements") as mock_add_sr,
         patch("app.services.firestore_service.add_clarification_turn"),
         patch("app.services.firestore_service.set_project_status"),
-        patch("app.ai.gemini.client.apply_clarifications", return_value=gemini_result),
+        patch("app.ai.gemini.agents.coordinator.RequirementsCoordinator.apply_clarification", return_value=gemini_result),
     ):
         apply_clarification_in_background("uid123", "proj456", "AMB-01", "Auth method?", "email/password")
         time.sleep(0.5)

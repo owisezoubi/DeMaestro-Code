@@ -7,11 +7,9 @@ import threading
 
 import structlog
 
-from app.ai.gemini import client as gemini
-from app.ai.gemini.agents import AnalystAgent
+from app.ai.gemini.agents.coordinator import RequirementsCoordinator
 from app.models.project import ProjectStatus
 from app.models.raw_input import RawInputType
-from app.models.structured_requirements import ClarificationAnswer
 from app.services import firestore_service
 
 log = structlog.get_logger(__name__)
@@ -40,7 +38,8 @@ def _run_structuring(uid: str, project_id: str) -> None:
             firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
             return
 
-        sr = AnalystAgent().analyze(combined)
+        coordinator = RequirementsCoordinator()
+        sr = coordinator.analyze(combined)
 
         if len(sr.ambiguities) > _INITIAL_AMBIGUITY_CAP:
             log.info(
@@ -109,8 +108,8 @@ def _run_apply_clarification(
             firestore_service.set_project_status(uid, project_id, ProjectStatus.awaiting_approval)
             return
 
-        clarification = ClarificationAnswer(question_id=ambiguity_id, answer=answer)
-        updated = gemini.apply_clarifications(current, [clarification])
+        coordinator = RequirementsCoordinator()
+        updated = coordinator.apply_clarification(current, ambiguity_id, answer)
 
         round_cap = _ROUND_CAP.get(new_round)
         if round_cap is not None and len(updated.ambiguities) > round_cap:

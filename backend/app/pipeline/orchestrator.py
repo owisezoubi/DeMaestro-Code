@@ -8,6 +8,7 @@ import threading
 import structlog
 
 from app.ai.gemini import client as gemini
+from app.ai.gemini.agents import AnalystAgent
 from app.models.project import ProjectStatus
 from app.models.raw_input import RawInputType
 from app.models.structured_requirements import ClarificationAnswer
@@ -39,7 +40,7 @@ def _run_structuring(uid: str, project_id: str) -> None:
             firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
             return
 
-        sr = gemini.structure_requirements(combined)
+        sr = AnalystAgent().analyze(combined)
 
         if len(sr.ambiguities) > _INITIAL_AMBIGUITY_CAP:
             log.info(

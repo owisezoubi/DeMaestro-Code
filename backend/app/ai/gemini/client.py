@@ -153,26 +153,6 @@ def _call_gemini(system_prompt: str, user_content: str, *, stage: str = "gemini"
         raise
 
 
-def structure_requirements(raw_input: str) -> StructuredRequirements:
-    """Convert raw user input into a StructuredRequirements contract."""
-    if is_mock():
-        log.info("gemini.mock", stage="structure_requirements")
-        return _MOCK_SR
-
-    system_prompt = _load_prompt("structure_requirements")
-    raw = _call_gemini(system_prompt, raw_input, stage="structure_requirements")
-    try:
-        return StructuredRequirements.model_validate(raw)
-    except Exception as exc:
-        log.error(
-            "gemini.schema_error",
-            stage="structure_requirements",
-            raw_preview=str(raw)[:500],
-            error=str(exc),
-        )
-        raise ValueError(f"Gemini returned invalid schema: {exc}") from exc
-
-
 def apply_clarifications(
     current: StructuredRequirements,
     answers: list[ClarificationAnswer],

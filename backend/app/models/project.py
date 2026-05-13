@@ -11,6 +11,7 @@ class ProjectStatus(str, Enum):
     structuring = "structuring"
     clarifying = "clarifying"
     awaiting_approval = "awaiting_approval"
+    approved = "approved"
     blueprinting = "blueprinting"
     generating = "generating"
     verifying = "verifying"
@@ -38,3 +39,7 @@ class ProjectMeta(BaseModel):
     clarification_round: int = 0
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    summary: Optional[str] = None
+    blueprint: Optional[dict] = None
+    approved_at: Optional[datetime] = None
+    approval_notes: Optional[str] = None

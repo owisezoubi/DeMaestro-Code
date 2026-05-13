@@ -1,5 +1,6 @@
-"""Tests for Gemini agents (W3.5-Patch 2 & 3). No real API calls are made."""
-from app.ai.gemini.agents import AnalystAgent, ClarificationAgent, ValidatorAgent
+"""Tests for Gemini agents (W3.5-Patch 2, 3 & 4). No real API calls are made."""
+from app.ai.gemini.agents import AnalystAgent, ClarificationAgent, SummaryAgent, BlueprintAgent, ValidatorAgent
+from app.ai.gemini.agents.blueprint import BlueprintResponse
 from app.ai.gemini.agents.coordinator import RequirementsCoordinator
 from app.models.structured_requirements import (
     AmbiguityFlag,
@@ -222,3 +223,78 @@ def test_coordinator_analyze_runs_analyst_then_validator(monkeypatch):
         assert r.validation.atomicity != FundamentalStatus.not_evaluated
         assert r.validation.verifiability != FundamentalStatus.not_evaluated
         assert r.validation.unambiguity != FundamentalStatus.not_evaluated
+
+
+# ── SummaryAgent ──────────────────────────────────────────────────────────────
+
+def test_summary_agent_mock_mode_includes_project_name_and_categories(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    agent = SummaryAgent()
+    result = agent.generate_summary(sr)
+    assert isinstance(result, str)
+    assert "TestApp" in result
+    assert "functional" in result.lower()
+
+
+def test_summary_agent_generates_markdown_containing_requirement_statements(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    agent = SummaryAgent()
+    result = agent.generate_summary(sr)
+    # Every requirement statement should appear in the summary.
+    for r in sr.user_requirements:
+        assert r.statement in result
+
+
+# ── BlueprintAgent ────────────────────────────────────────────────────────────
+
+def test_blueprint_agent_mock_mode_returns_mock_data(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    agent = BlueprintAgent()
+    result = agent.generate_blueprint(sr)
+    assert isinstance(result, BlueprintResponse)
+
+
+def test_blueprint_agent_generates_blueprint_with_at_least_one_table_route_page(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    result = BlueprintAgent().generate_blueprint(sr)
+    assert len(result.database_schema) >= 1
+    assert len(result.api_routes) >= 1
+    assert len(result.frontend_pages) >= 1
+
+
+# ── Coordinator summary + blueprint delegation ────────────────────────────────
+
+def test_coordinator_generate_summary_delegates_to_summary_agent(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    coordinator = RequirementsCoordinator()
+    result = coordinator.generate_summary(sr)
+    assert isinstance(result, str)
+    assert len(result) > 0
+
+
+def test_coordinator_generate_blueprint_delegates_to_blueprint_agent(monkeypatch):
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+    sr = _make_sr()
+    coordinator = RequirementsCoordinator()
+    result = coordinator.generate_blueprint(sr)
+    assert isinstance(result, BlueprintResponse)
+    assert len(result.database_schema) >= 1
+    assert len(result.api_routes) >= 1
+    assert len(result.frontend_pages) >= 1

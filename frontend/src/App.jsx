@@ -4,6 +4,7 @@ import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
 import NewProject from './pages/NewProject'
+import ProjectApproval from './pages/ProjectApproval'
 import ProjectChat from './pages/ProjectChat'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -33,6 +34,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ProjectChat />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:id/approve"
+        element={
+          <ProtectedRoute>
+            <ProjectApproval />
           </ProtectedRoute>
         }
       />

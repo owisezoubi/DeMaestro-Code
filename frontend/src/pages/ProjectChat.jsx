@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
@@ -33,6 +33,7 @@ const STATUS_DESC = {
 
 export default function ProjectChat() {
   const { id: projectId } = useParams()
+  const navigate = useNavigate()
   const qc = useQueryClient()
 
   const { data: statusData } = useQuery({
@@ -79,13 +80,14 @@ export default function ProjectChat() {
           projectId={projectId}
           clarifications={clarifications}
           qc={qc}
+          navigate={navigate}
         />
       </main>
     </div>
   )
 }
 
-function MainContent({ status, projectId, clarifications, qc }) {
+function MainContent({ status, projectId, clarifications, qc, navigate }) {
   if (!status) {
     return (
       <div className="card flex items-center gap-3 text-slate-500">
@@ -139,7 +141,7 @@ function MainContent({ status, projectId, clarifications, qc }) {
         </p>
         <button
           className="btn-primary"
-          onClick={() => toast.info('Approval page coming in Week 4')}
+          onClick={() => navigate(`/projects/${projectId}/approve`)}
         >
           Review and approve →
         </button>

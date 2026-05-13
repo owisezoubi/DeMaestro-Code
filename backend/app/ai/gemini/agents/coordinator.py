@@ -1,10 +1,12 @@
-"""RequirementsCoordinator — orchestrates Analyst, Validator, and Clarification agents."""
+"""RequirementsCoordinator — orchestrates all Gemini agents."""
 from typing import Optional
 
 import structlog
 
 from app.ai.gemini.agents.analyst import AnalystAgent
+from app.ai.gemini.agents.blueprint import BlueprintAgent, BlueprintResponse
 from app.ai.gemini.agents.clarification import ClarificationAgent
+from app.ai.gemini.agents.summary import SummaryAgent
 from app.ai.gemini.agents.validator import ValidatorAgent
 from app.models.structured_requirements import AmbiguityFlag, StructuredRequirements
 
@@ -14,6 +16,8 @@ class RequirementsCoordinator:
         self.analyst = AnalystAgent()
         self.validator = ValidatorAgent()
         self.clarification = ClarificationAgent()
+        self.summary = SummaryAgent()
+        self.blueprint = BlueprintAgent()
         self.log = structlog.get_logger("RequirementsCoordinator")
 
     def analyze(self, raw_input: str) -> StructuredRequirements:
@@ -45,3 +49,18 @@ class RequirementsCoordinator:
 
     def next_question(self, sr: StructuredRequirements) -> Optional[AmbiguityFlag]:
         return self.clarification.select_next_question(sr)
+
+    def generate_summary(self, sr: StructuredRequirements) -> str:
+        self.log.info("coordinator.generate_summary.start", app_name=sr.app_name)
+        result = self.summary.generate_summary(sr)
+        self.log.info("coordinator.generate_summary.done", summary_length=len(result))
+        return result
+
+    def generate_blueprint(self, sr: StructuredRequirements) -> BlueprintResponse:
+        self.log.info("coordinator.generate_blueprint.start", app_name=sr.app_name)
+        result = self.blueprint.generate_blueprint(sr)
+        self.log.info(
+            "coordinator.generate_blueprint.done",
+            num_tables=len(result.database_schema),
+        )
+        return result

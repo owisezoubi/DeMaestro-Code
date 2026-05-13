@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import firebase_admin as fb
 from app.config import settings
+from app.routes import approval as approval_routes
 from app.routes import auth as auth_routes
 from app.routes import generation as generation_routes
 from app.routes import projects as projects_routes
@@ -90,3 +91,4 @@ app.include_router(
 )
 app.include_router(generation_routes.router, prefix="/projects", tags=["generation"])
 app.include_router(structure_routes.router, prefix="/projects", tags=["structuring"])
+app.include_router(approval_routes.router, prefix="/projects", tags=["approval"])

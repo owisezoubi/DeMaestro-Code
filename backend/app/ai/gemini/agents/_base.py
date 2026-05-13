@@ -126,6 +126,53 @@ class GeminiAgent(ABC):
             )
             raise
 
+    def _call_gemini_text(
+        self,
+        system_prompt: str,
+        user_content: str,
+        *,
+        stage: str = "default",
+    ) -> str:
+        """Call Gemini and return the raw text response (no JSON parsing)."""
+        genai.configure(api_key=settings.gemini_api_key)
+        model_name = self._model_name()
+        gemini_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=genai.types.GenerationConfig(
+                temperature=self.temperature,
+            ),
+            system_instruction=system_prompt,
+        )
+        start = time.time()
+        try:
+            response = gemini_model.generate_content(user_content)
+            duration_ms = round((time.time() - start) * 1000)
+
+            usage = getattr(response, "usage_metadata", None)
+            tokens_in = getattr(usage, "prompt_token_count", None) if usage else None
+            tokens_out = getattr(usage, "candidates_token_count", None) if usage else None
+
+            self.log.info(
+                "gemini.call",
+                agent=self.agent_name,
+                stage=stage,
+                model=model_name,
+                prompt_chars=len(system_prompt),
+                response_chars=len(response.text),
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                duration_ms=duration_ms,
+            )
+            return response.text
+        except Exception as exc:
+            self.log.error(
+                "gemini.error",
+                agent=self.agent_name,
+                stage=stage,
+                error=str(exc),
+            )
+            raise
+
     @abstractmethod
     def process(self, *args, **kwargs):
         ...

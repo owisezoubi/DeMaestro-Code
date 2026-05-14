@@ -1,0 +1,582 @@
+"""Tests for Claude-backed agents and GenerationOrchestrator.
+No real API, Firestore, or Docker calls are made."""
+from unittest.mock import MagicMock, patch
+
+from app.ai.claude.agents.architect import ArchitectAgent
+from app.ai.claude.agents.debugger import DebuggerAgent
+from app.ai.claude.agents.deployer import DeployerAgent
+from app.ai.claude.agents.generator import GeneratorAgent
+from app.ai.claude.agents.tester import TesterAgent
+from app.ai.claude.agents.verifier import VerifierAgent
+from app.ai.gemini.agents.blueprint import APIRoute, BlueprintResponse, DatabaseTable, FrontendPage
+from app.models.generation_plan import FileToGenerate, GenerationPlan
+from app.models.project import ProjectMeta, ProjectStatus
+from app.models.structured_requirements import (
+    Entity,
+    RequirementCategory,
+    StructuredRequirements,
+    UserRequirement,
+)
+
+
+# ── shared fixtures ───────────────────────────────────────────────────────────
+
+def _make_sr() -> StructuredRequirements:
+    return StructuredRequirements(
+        app_name="WorkoutTracker",
+        summary="A fitness tracking app.",
+        entities=[Entity(name="Workout", description="A workout session", fields=["id", "type", "duration"])],
+        user_requirements=[
+            UserRequirement(
+                id="UR-01",
+                statement="A logged-in user can log a new workout session.",
+                rationale="Core feature.",
+                acceptance_criteria=["POST /workouts returns 201 with valid data"],
+                priority="must",
+                category=RequirementCategory.functional,
+            )
+        ],
+        ambiguities=[],
+    )
+
+
+def _make_blueprint() -> BlueprintResponse:
+    return BlueprintResponse(
+        database_schema=[
+            DatabaseTable(
+                name="Workouts",
+                columns=[{"name": "id", "type": "uuid"}, {"name": "type", "type": "text"}],
+                description="Stores workout records",
+            )
+        ],
+        api_routes=[
+            APIRoute(method="GET", path="/api/workouts", description="List workouts",
+                     request_schema="None", response_schema="list"),
+            APIRoute(method="POST", path="/api/workouts", description="Create workout",
+                     request_schema="type, duration", response_schema="workout object"),
+        ],
+        frontend_pages=[
+            FrontendPage(name="Dashboard", route="/dashboard", purpose="Overview",
+                         key_components=["StatsCard"]),
+        ],
+        technology_stack_notes="React + FastAPI + PostgreSQL",
+    )
+
+
+def _make_project(blueprint: BlueprintResponse) -> ProjectMeta:
+    return ProjectMeta(
+        id="proj-test",
+        name="WorkoutTracker",
+        status=ProjectStatus.approved,
+        blueprint=blueprint.model_dump(),
+    )
+
+
+def _make_plan() -> GenerationPlan:
+    return GenerationPlan(
+        technology_stack="python-postgres",
+        files=[
+            FileToGenerate(path="backend/app/models.py", description="DB models.",
+                           depends_on=[], template="db_schema"),
+            FileToGenerate(path="backend/app/routes/workouts.py", description="Workout routes.",
+                           depends_on=["backend/app/models.py"], template="fastapi_route"),
+        ],
+        generation_order=["backend/app/models.py", "backend/app/routes/workouts.py"],
+        notes="test plan",
+    )
+
+
+# ── ArchitectAgent ────────────────────────────────────────────────────────────
+
+def test_architect_outputs_valid_generation_plan(monkeypatch):
+    """ArchitectAgent produces a valid GenerationPlan in mock mode."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    plan = ArchitectAgent().architect(_make_sr(), _make_blueprint())
+
+    assert isinstance(plan, GenerationPlan)
+    assert plan.technology_stack == "python-postgres"
+    assert len(plan.files) > 0
+    assert len(plan.generation_order) == len(plan.files)
+
+
+def test_architect_generation_order_matches_files(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    plan = ArchitectAgent().architect(_make_sr(), _make_blueprint())
+    file_paths = {f.path for f in plan.files}
+    for path in plan.generation_order:
+        assert path in file_paths
+
+
+def test_architect_includes_backend_and_frontend_files(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    plan = ArchitectAgent().architect(_make_sr(), _make_blueprint())
+    paths = [f.path for f in plan.files]
+    assert any("backend" in p or ".py" in p for p in paths)
+    assert any("frontend" in p or ".jsx" in p or ".tsx" in p for p in paths)
+
+
+# ── GeneratorAgent ────────────────────────────────────────────────────────────
+
+def test_generator_respects_templates(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    ftg = FileToGenerate(path="frontend/src/pages/Dashboard.jsx",
+                         description="Dashboard.", depends_on=[], template="react_page")
+    content = GeneratorAgent().generate_file(ftg, _make_plan(), _make_blueprint(), {})
+
+    assert "useQuery" in content
+    assert "useState" in content
+
+
+def test_generator_fastapi_template_contains_router(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    ftg = FileToGenerate(path="backend/app/routes/workouts.py",
+                         description="Workout CRUD.", depends_on=[], template="fastapi_route")
+    content = GeneratorAgent().generate_file(ftg, _make_plan(), _make_blueprint(), {})
+
+    assert "APIRouter" in content
+    assert "router" in content
+
+
+def test_generator_none_template_returns_nonempty_content(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    ftg = FileToGenerate(path="docker-compose.yml", description="Docker config.",
+                         depends_on=[], template="none")
+    content = GeneratorAgent().generate_file(ftg, _make_plan(), _make_blueprint(), {})
+    assert len(content) > 0
+
+
+def test_generator_includes_dependencies_in_prompt():
+    dep_content = "class Workout(Base):\n    __tablename__ = 'workouts'"
+    ftg = FileToGenerate(path="backend/app/routes/workouts.py",
+                         description="Workout routes.",
+                         depends_on=["backend/app/models.py"], template="fastapi_route")
+    prompt = GeneratorAgent()._build_generate_prompt(
+        ftg, _make_plan(), _make_blueprint(),
+        {"backend/app/models.py": dep_content}, template=None,
+    )
+    assert dep_content in prompt
+    assert "backend/app/models.py" in prompt
+
+
+# ── TesterAgent ───────────────────────────────────────────────────────────────
+
+def test_tester_mock_mode_all_checks_pass(monkeypatch):
+    """TesterAgent in mock mode returns success when all .py files are valid."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    files = {
+        "backend/app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+        "backend/app/models.py": "x = 1\n",
+    }
+    result = TesterAgent().run_tests(files, _make_plan())
+
+    assert result["status"] == "success"
+    assert result["passed_checks"]["install"] is True
+    assert result["passed_checks"]["lint"] is True
+    assert result["passed_checks"]["typecheck"] is True
+    assert result["passed_checks"]["boot"] is True
+
+
+def test_tester_mock_mode_four_checks_present(monkeypatch):
+    """TesterAgent always returns all four check keys."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    result = TesterAgent().run_tests({"a.py": "x = 1\n"}, _make_plan())
+    assert set(result["passed_checks"].keys()) == {"install", "lint", "typecheck", "boot"}
+
+
+def test_tester_detects_syntax_errors(monkeypatch):
+    """TesterAgent fails lint when a .py file has a SyntaxError."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    broken_py = "def broken(\n    pass\n"  # invalid: missing closing paren before body
+    files = {"backend/app/routes/workouts.py": broken_py}
+    result = TesterAgent().run_tests(files, _make_plan())
+
+    assert result["status"] == "failed"
+    assert result["passed_checks"]["lint"] is False
+    assert any("workouts.py" in e for e in result["errors"])
+
+
+def test_tester_non_python_files_do_not_fail_lint(monkeypatch):
+    """TesterAgent ignores non-.py files in lint check."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    files = {"frontend/src/App.jsx": "const x = <div>; not real jsx"}
+    result = TesterAgent().run_tests(files, _make_plan())
+
+    assert result["passed_checks"]["lint"] is True
+
+
+# ── DebuggerAgent ─────────────────────────────────────────────────────────────
+
+def test_debugger_fixes_one_file_per_attempt(monkeypatch):
+    """DebuggerAgent returns fixed_files with one entry and increments attempt count."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    test_results = {
+        "status": "failed",
+        "errors": ["backend/app/routes/workouts.py: SyntaxError at line 1: invalid syntax"],
+        "logs": {"lint": "error"},
+        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+    }
+    generated_files = {"backend/app/routes/workouts.py": "def broken("}
+
+    result = DebuggerAgent().debug_and_fix(test_results, generated_files, _make_plan())
+
+    assert result["status"] == "fixed"
+    assert "backend/app/routes/workouts.py" in result["fixed_files"]
+    assert result["attempt_counts"]["backend/app/routes/workouts.py"] == 1
+    assert result["errors"] == []
+
+
+def test_debugger_mock_fix_prepends_comment(monkeypatch):
+    """Mock fix prepends a '# FIXED:' comment to the original content."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    test_results = {
+        "status": "failed",
+        "errors": ["backend/app/models.py: SyntaxError at line 3: unexpected EOF"],
+        "logs": {},
+        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+    }
+    original = "class Model:\n    pass\n"
+    generated_files = {"backend/app/models.py": original}
+
+    result = DebuggerAgent().debug_and_fix(test_results, generated_files, _make_plan())
+
+    fixed = result["fixed_files"]["backend/app/models.py"]
+    assert fixed.startswith("# FIXED:")
+    assert original in fixed
+
+
+def test_debugger_respects_3_attempt_cap(monkeypatch):
+    """DebuggerAgent returns error when attempt_count >= 3 for the file."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    test_results = {
+        "status": "failed",
+        "errors": ["backend/app/routes/workouts.py: SyntaxError at line 1: invalid syntax"],
+        "logs": {},
+        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+    }
+    generated_files = {"backend/app/routes/workouts.py": "def broken("}
+    # already at max attempts
+    attempt_count = {"backend/app/routes/workouts.py": 3}
+
+    result = DebuggerAgent().debug_and_fix(test_results, generated_files, _make_plan(), attempt_count)
+
+    assert result["status"] == "error"
+    assert any("Max" in e for e in result["errors"])
+
+
+def test_debugger_no_errors_returns_success(monkeypatch):
+    """DebuggerAgent returns success immediately if test_results has no errors."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    result = DebuggerAgent().debug_and_fix(
+        {"status": "success", "errors": [], "logs": {}, "passed_checks": {}},
+        {},
+        _make_plan(),
+    )
+    assert result["status"] == "success"
+    assert result["fixed_files"] == {}
+
+
+# ── VerifierAgent ─────────────────────────────────────────────────────────────
+
+def test_verifier_checks_routes_exist():
+    """VerifierAgent flags missing API routes when no matching files are passed."""
+    result = VerifierAgent().verify({}, _make_plan(), _make_blueprint())
+
+    assert result["status"] == "fail"
+    assert any("GET /api/workouts" in issue for issue in result["issues"])
+    assert any("POST /api/workouts" in issue for issue in result["issues"])
+
+
+def test_verifier_passes_when_all_routes_present():
+    """VerifierAgent passes route check when decorators are present."""
+    files = {
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\ndef list_workouts(): pass\n"
+            "@router.post('/api/workouts')\ndef create_workout(): pass\n"
+        ),
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+    }
+    result = VerifierAgent().verify(files, _make_plan(), _make_blueprint())
+    route_issues = [i for i in result["issues"] if "Route" in i]
+    assert route_issues == []
+
+
+def test_verifier_checks_imports():
+    """VerifierAgent flags route files missing a FastAPI import."""
+    files = {
+        "backend/app/routes/workouts.py": (
+            "@router.get('/api/workouts')\n"
+            "@router.post('/api/workouts')\n"
+            "def handler(): pass\n"
+        ),
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+    }
+    result = VerifierAgent().verify(files, _make_plan(), _make_blueprint())
+    import_issues = [i for i in result["issues"] if "FastAPI" in i]
+    assert len(import_issues) >= 1
+
+
+def test_verifier_flags_missing_db_models():
+    """VerifierAgent flags when no model file mentions a blueprint table."""
+    files = {
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\n@router.post('/api/workouts')\n"
+            "def h(): pass\n"
+        ),
+        "backend/app/models.py": "x = 1\n",  # no table name 'Workouts'
+    }
+    result = VerifierAgent().verify(files, _make_plan(), _make_blueprint())
+    db_issues = [i for i in result["issues"] if "model" in i.lower() or "schema" in i.lower()]
+    assert len(db_issues) >= 1
+
+
+# ── DeployerAgent ─────────────────────────────────────────────────────────────
+
+def test_deployer_creates_zip_and_returns_url(monkeypatch):
+    """DeployerAgent creates a valid ZIP in mock mode and returns a URL."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    files = {
+        "backend/app/main.py": "from fastapi import FastAPI\napp = FastAPI()\n",
+        "frontend/src/App.jsx": "export default function App() { return null; }\n",
+    }
+    result = DeployerAgent().deploy("uid123", "proj-test", files, _make_plan())
+
+    assert result["status"] == "success"
+    assert result["deployment_url"] is not None
+    assert "proj-test" in result["deployment_url"]
+    assert result["deployment_id"] is not None
+    assert result["errors"] == []
+
+
+def test_deployer_zip_contains_all_files(monkeypatch):
+    """DeployerAgent ZIP includes all generated files."""
+    import io
+    import zipfile
+
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    files = {
+        "backend/app/main.py": "app = 1\n",
+        "README.md": "# Project\n",
+    }
+    deployer = DeployerAgent()
+    zip_buf = deployer._create_zip(files)
+
+    with zipfile.ZipFile(io.BytesIO(zip_buf.getvalue())) as zf:
+        names = zf.namelist()
+
+    assert "backend/app/main.py" in names
+    assert "README.md" in names
+
+
+# ── GenerationOrchestrator ────────────────────────────────────────────────────
+
+def test_generation_orchestrator_runs_full_pipeline(monkeypatch):
+    """Orchestrator run_generation (W5-P1) architect → generate → store."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    sr = _make_sr()
+    blueprint = _make_blueprint()
+    project = _make_project(blueprint)
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
+        patch("app.services.firestore_service.update_project") as mock_update,
+        patch("app.services.firestore_service.set_project_status"),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+
+        result = GenerationOrchestrator().run_generation("uid123", "proj-test")
+
+    assert result["status"] == "success"
+    assert len(result["generated_files"]) > 0
+    assert result["plan"] is not None
+    assert result["errors"] == []
+
+    mock_update.assert_called_once()
+    payload = mock_update.call_args[0][2]
+    assert "generated_files" in payload
+    assert "generation_plan" in payload
+    assert payload["status"] == ProjectStatus.generated
+
+
+def test_generation_orchestrator_errors_on_missing_project(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=None),
+        patch("app.services.firestore_service.set_project_status"),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+
+        result = GenerationOrchestrator().run_generation("uid123", "bad-proj")
+
+    assert result["status"] == "error"
+    assert len(result["errors"]) > 0
+
+
+def test_generation_orchestrator_errors_on_missing_blueprint(monkeypatch):
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    project_no_bp = ProjectMeta(id="proj-test", name="TestApp",
+                                status=ProjectStatus.approved, blueprint=None)
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project_no_bp),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=_make_sr()),
+        patch("app.services.firestore_service.set_project_status"),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+
+        result = GenerationOrchestrator().run_generation("uid123", "proj-test")
+
+    assert result["status"] == "error"
+    assert any("blueprint" in e.lower() for e in result["errors"])
+
+
+def test_orchestrator_full_pipeline_architect_to_deploy(monkeypatch):
+    """run_full_pipeline flows through all states in mock mode."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    sr = _make_sr()
+    blueprint = _make_blueprint()
+    project = _make_project(blueprint)
+
+    # Build files that will pass the verifier
+    generated_files_result = {
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\n@router.post('/api/workouts')\n"
+            "def h(): pass\n"
+        ),
+    }
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
+        patch("app.services.firestore_service.update_project") as mock_update,
+        patch("app.services.firestore_service.set_project_status") as mock_set_status,
+        # Stub architect and generator so we control the files
+        patch(
+            "app.ai.claude.agents.architect.ArchitectAgent.architect",
+            return_value=_make_plan(),
+        ),
+        patch(
+            "app.ai.claude.agents.generator.GeneratorAgent.generate_file",
+            side_effect=lambda ftg, *a, **kw: generated_files_result.get(ftg.path, "# mock\n"),
+        ),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+
+        result = GenerationOrchestrator().run_full_pipeline("uid123", "proj-test")
+
+    assert result["status"] == "success"
+    assert result["deployment_url"] is not None
+    assert result["errors"] == []
+
+    # Verify state transitions occurred
+    set_statuses = [call.args[2] for call in mock_set_status.call_args_list]
+    assert ProjectStatus.generating in set_statuses
+    assert ProjectStatus.testing in set_statuses
+    assert ProjectStatus.verifying in set_statuses
+    assert ProjectStatus.deploying in set_statuses
+
+    # Final update should include deployed + deployment_url
+    final_update = mock_update.call_args_list[-1].args[2]
+    assert final_update["status"] == ProjectStatus.deployed
+    assert "deployment_url" in final_update
+
+
+def test_orchestrator_full_pipeline_debug_loop_fires_on_test_failure(monkeypatch):
+    """When tests fail once then pass, the debug loop runs exactly once."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    sr = _make_sr()
+    blueprint = _make_blueprint()
+    project = _make_project(blueprint)
+
+    generated_files_result = {
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\n@router.post('/api/workouts')\n"
+            "def h(): pass\n"
+        ),
+    }
+
+    # Tester fails on first call, passes on second
+    fail_result = {
+        "status": "failed",
+        "errors": ["backend/app/models.py: SyntaxError at line 1: invalid syntax"],
+        "logs": {"lint": "error"},
+        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+    }
+    pass_result = {
+        "status": "success",
+        "errors": [],
+        "logs": {"install": "ok", "lint": "ok", "typecheck": "ok", "boot": "ok"},
+        "passed_checks": {"install": True, "lint": True, "typecheck": True, "boot": True},
+    }
+
+    call_count = {"n": 0}
+
+    def mock_test(files, plan):
+        call_count["n"] += 1
+        return fail_result if call_count["n"] == 1 else pass_result
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
+        patch("app.services.firestore_service.update_project"),
+        patch("app.services.firestore_service.set_project_status"),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=_make_plan()),
+        patch(
+            "app.ai.claude.agents.generator.GeneratorAgent.generate_file",
+            side_effect=lambda ftg, *a, **kw: generated_files_result.get(ftg.path, "# mock\n"),
+        ),
+        patch.object(TesterAgent, "run_tests", side_effect=mock_test),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+
+        result = GenerationOrchestrator().run_full_pipeline("uid123", "proj-test")
+
+    assert result["status"] == "success"
+    assert call_count["n"] == 2  # tester called twice: fail then pass

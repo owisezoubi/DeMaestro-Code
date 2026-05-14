@@ -14,7 +14,13 @@ class ProjectStatus(str, Enum):
     approved = "approved"
     blueprinting = "blueprinting"
     generating = "generating"
+    generated = "generated"
+    testing = "testing"
+    tested = "tested"
     verifying = "verifying"
+    verified = "verified"
+    deploying = "deploying"
+    deployed = "deployed"
     packaging = "packaging"
     ready = "ready"
     failed = "failed"
@@ -43,3 +49,8 @@ class ProjectMeta(BaseModel):
     blueprint: Optional[dict] = None
     approved_at: Optional[datetime] = None
     approval_notes: Optional[str] = None
+    generated_files: Optional[dict] = None  # { file_path: content }
+    generation_plan: Optional[dict] = None  # GenerationPlan as dict
+    deployment_url: Optional[str] = None
+    deployment_id: Optional[str] = None
+    error_message: Optional[str] = None

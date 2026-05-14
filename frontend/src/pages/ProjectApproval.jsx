@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Markdown from 'react-markdown'
 import { toast } from 'sonner'
@@ -7,10 +7,12 @@ import { ArrowLeft, CheckCircle2, Database, Layout, Loader2, Users } from 'lucid
 
 import Logo from '../components/Logo'
 import { approveProject } from '../api/approval'
+import { startGeneration } from '../api/generation'
 import { getProject } from '../api/projects'
 
 export default function ProjectApproval() {
   const { id: projectId } = useParams()
+  const navigate = useNavigate()
   const qc = useQueryClient()
   const [activeTab, setActiveTab] = useState('summary')
 
@@ -23,10 +25,14 @@ export default function ProjectApproval() {
   const approveMut = useMutation({
     mutationFn: () => approveProject(projectId),
     onSuccess: async () => {
-      toast.success('Project approved!')
-      await qc.invalidateQueries({ queryKey: ['project', projectId] })
+      toast.success('Approved! Starting generation…')
+      // Fire-and-forget: start generation in the background, then navigate.
+      // Errors here are non-fatal — generation page polls for current status.
+      startGeneration(projectId).catch(() => {})
+      navigate(`/projects/${projectId}/generation`)
     },
-    onError: (err) => toast.error(err.message || 'Approval failed. Please try again.'),
+    onError: (err) =>
+      toast.error(err.friendlyMessage || err.message || 'Approval failed. Please try again.'),
   })
 
   if (isLoading) {

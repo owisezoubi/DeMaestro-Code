@@ -181,7 +181,14 @@ def _run_apply_clarification(
             project_id=project_id,
             error=str(exc),
         )
-        firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
+        # Keep project in clarifying (not failed) so the user can retry.
+        # Store the error message so the frontend can surface it if needed.
+        try:
+            firestore_service.update_project(
+                uid, project_id, {"last_error": str(exc)}
+            )
+        except Exception:
+            pass  # best-effort; don't mask the original error
 
 
 def apply_clarification_in_background(

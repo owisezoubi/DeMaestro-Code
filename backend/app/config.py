@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     claude_model: str = Field(default="claude-sonnet-4-6")
     mock_ai: bool = Field(default=False)
 
+    # --- Deployment ---
+    vercel_token: str = Field(default="")
+
     # --- Observability ---
     sentry_dsn: str = Field(default="")
 

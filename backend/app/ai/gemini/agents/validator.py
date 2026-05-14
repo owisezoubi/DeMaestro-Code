@@ -1,4 +1,6 @@
 """ValidatorAgent — algorithmic + LLM semantic audit of StructuredRequirements."""
+import json
+import re
 from typing import Literal, Optional
 
 from pydantic import BaseModel
@@ -26,6 +28,7 @@ class RequirementIssue(BaseModel):
 
 class ValidatorResponse(BaseModel):
     issues: list[RequirementIssue]
+    is_complete: bool = True  # Gemini may include this; we accept but don't require it
 
 
 class ValidatorAgent(GeminiAgent):
@@ -123,13 +126,11 @@ class ValidatorAgent(GeminiAgent):
         if self.is_mock():
             response = ValidatorResponse(issues=[])
         else:
-            system_prompt = self._load_prompt()
-            response = self._call_gemini(
-                system_prompt=system_prompt,
-                user_content=sr.model_dump_json(indent=2),
-                response_model=ValidatorResponse,
-                stage="validator",
-            )
+            try:
+                response = self._call_gemini_with_fallback(sr)
+            except Exception as exc:
+                self.log.warning("validator.semantic_pass.fallback", error=str(exc))
+                response = ValidatorResponse(issues=[])
 
         # Apply LLM issues.
         ur_id_to_idx = {r.id: i for i, r in enumerate(sr.user_requirements)}
@@ -180,6 +181,46 @@ class ValidatorAgent(GeminiAgent):
             num_algorithmic_failures=num_algorithmic_failures,
         )
         return sr
+
+    def _call_gemini_with_fallback(self, sr: StructuredRequirements) -> ValidatorResponse:
+        """Call Gemini for semantic validation with a two-stage JSON fallback.
+
+        Stage 1: use _call_gemini (structured JSON mode).
+        Stage 2: if that fails, call _call_gemini_text and manually strip code fences.
+        Both stages raise on unrecoverable failures so the caller can fall back to
+        ValidatorResponse(issues=[]).
+        """
+        system_prompt = self._load_prompt()
+        user_content = sr.model_dump_json(indent=2)
+
+        # Stage 1 — structured JSON mode
+        try:
+            return self._call_gemini(
+                system_prompt=system_prompt,
+                user_content=user_content,
+                response_model=ValidatorResponse,
+                stage="validator",
+            )
+        except (ValueError, Exception) as exc:
+            self.log.warning(
+                "validator.gemini_json_failed_trying_text", error=str(exc)
+            )
+
+        # Stage 2 — plain text + manual parse
+        raw = self._call_gemini_text(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            stage="validator_text_fallback",
+        )
+        raw = raw.strip()
+
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw.strip())
+
+        data = json.loads(raw)  # raises JSONDecodeError if still malformed
+        return ValidatorResponse(**data)
 
     def process(self, sr: StructuredRequirements) -> StructuredRequirements:
         return self.validate(sr)

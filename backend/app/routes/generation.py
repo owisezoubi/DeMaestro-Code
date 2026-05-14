@@ -1,7 +1,10 @@
 """Generation pipeline routes — W5-P2."""
+import io
 import threading
+import zipfile
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.auth.dependencies import CurrentUser
 from app.models.project import ProjectStatus
@@ -54,8 +57,10 @@ async def get_generation_status(project_id: str, user: CurrentUser) -> dict:
     return {
         "project_id": project_id,
         "status": project.status.value,
-        "generated_count": generated_count,
-        "total_files": total_files,
+        "generated_count": project.generated_count or generated_count,
+        "total_files": project.total_files or total_files,
+        "current_file": project.current_file,
+        "current_stage": project.current_stage,
         "deployment_url": project.deployment_url,
         "deployment_id": project.deployment_id,
         "error_message": project.error_message,
@@ -64,5 +69,21 @@ async def get_generation_status(project_id: str, user: CurrentUser) -> dict:
 
 @router.get("/{project_id}/download")
 async def download_zip(project_id: str, user: CurrentUser):
-    """Return a signed URL to the generated ZIP (FR13). Stub."""
-    raise HTTPException(status_code=501, detail="Not implemented yet — Week 6")
+    """Download generated code as a ZIP archive."""
+    project = firestore_service.get_project(user.uid, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.generated_files:
+        raise HTTPException(status_code=404, detail="No generated files available")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in project.generated_files.items():
+            zf.writestr(path, content)
+    buf.seek(0)
+
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename={project_id}.zip"},
+    )

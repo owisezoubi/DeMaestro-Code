@@ -102,3 +102,11 @@ The `suggested_fix` may use plain technical shorthand (it is for internal use), 
 }
 ```
 *Why it's bad: reads like a technical spec review, not a friendly question to the user. Rephrase as "I want to make sure I understand… Can you clarify…"*
+
+---
+
+**CRITICAL: Output format**
+
+Your response MUST be valid JSON only. No markdown, no code blocks, no explanations.
+Ensure every JSON field is properly closed. Use double quotes for all strings.
+If you cannot generate valid JSON, return: `{"issues": []}`

@@ -37,7 +37,7 @@ class DeployerAgent:
             zip_url = self._upload_to_cloud_storage(uid, project_id, zip_buffer)
 
             if plan.technology_stack == "python-postgres":
-                deployment = self._deploy_to_vercel(project_id, zip_url)
+                deployment = self._deploy_to_vercel(project_id, generated_files)
             else:
                 deployment = self._generate_deploy_button(project_id, zip_url, plan.technology_stack)
 
@@ -94,12 +94,41 @@ class DeployerAgent:
         self.log.info("_upload_to_cloud_storage.done", url=url)
         return url
 
-    def _deploy_to_vercel(self, project_id: str, zip_url: str) -> dict:
-        # TODO: call Vercel API — stub returns a predictable URL for now
-        return {
-            "id": f"deployment-{project_id}",
-            "url": f"https://{project_id}.vercel.app",
+    def _deploy_to_vercel(self, project_id: str, generated_files: dict[str, str]) -> dict:
+        import httpx
+
+        token = settings.vercel_token
+        if not token:
+            raise ValueError("VERCEL_TOKEN not configured")
+
+        files = [
+            {"file": path, "data": content, "encoding": "utf8"}
+            for path, content in generated_files.items()
+        ]
+
+        payload = {
+            "name": project_id,
+            "files": files,
+            "env": {
+                "FIREBASE_PROJECT_ID": settings.firebase_storage_bucket.split(".")[0] if settings.firebase_storage_bucket else "",
+            },
+            "projectSettings": {"framework": "other"},
         }
+
+        self.log.info("_deploy_to_vercel.request", project_id=project_id, num_files=len(files))
+        response = httpx.post(
+            "https://api.vercel.com/v13/deployments",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+        url = data.get("url") or f"{project_id}.vercel.app"
+        if not url.startswith("http"):
+            url = f"https://{url}"
+        self.log.info("_deploy_to_vercel.done", deployment_id=data.get("id"), url=url)
+        return {"id": data.get("id", f"deployment-{project_id}"), "url": url}
 
     def _generate_deploy_button(
         self, project_id: str, zip_url: str, stack: str

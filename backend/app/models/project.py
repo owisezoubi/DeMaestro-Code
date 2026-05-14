@@ -21,6 +21,9 @@ class ProjectStatus(str, Enum):
     verified = "verified"
     deploying = "deploying"
     deployed = "deployed"
+    modifying = "modifying"
+    regenerating = "regenerating"
+    deployment_failed = "deployment_failed"
     packaging = "packaging"
     ready = "ready"
     failed = "failed"
@@ -54,3 +57,11 @@ class ProjectMeta(BaseModel):
     deployment_url: Optional[str] = None
     deployment_id: Optional[str] = None
     error_message: Optional[str] = None
+    last_error: Optional[str] = None  # transient error (e.g. clarification failed); project stays retryable
+    last_change_request: Optional[str] = None
+    modification_round: Optional[int] = None
+    modification_round_completed: Optional[int] = None
+    current_file: Optional[str] = None
+    generated_count: int = 0
+    total_files: int = 0
+    current_stage: str = "architect"

@@ -23,3 +23,10 @@ export async function ensureUserProfile() {
   const r = await api.get('/auth/me')
   return r.data
 }
+
+export async function requestChanges(projectId, changeRequest) {
+  const r = await api.post(`/projects/${projectId}/request-changes`, {
+    change_request: changeRequest,
+  })
+  return r.data
+}

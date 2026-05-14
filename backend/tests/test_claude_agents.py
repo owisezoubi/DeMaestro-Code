@@ -1,5 +1,6 @@
 """Tests for Claude-backed agents and GenerationOrchestrator.
 No real API, Firestore, or Docker calls are made."""
+import subprocess
 from unittest.mock import MagicMock, patch
 
 from app.ai.claude.agents.architect import ArchitectAgent
@@ -580,3 +581,95 @@ def test_orchestrator_full_pipeline_debug_loop_fires_on_test_failure(monkeypatch
 
     assert result["status"] == "success"
     assert call_count["n"] == 2  # tester called twice: fail then pass
+
+
+def test_tester_runs_install_lint_typecheck_boot(monkeypatch):
+    """TesterAgent real mode calls install/lint/typecheck as subprocess.run and boot as Popen."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", False)
+
+    files = {"requirements.txt": "fastapi\n", "main.py": "x = 1\n"}
+
+    mock_proc_result = MagicMock()
+    mock_proc_result.returncode = 0
+    mock_proc_result.stdout = "ok"
+    mock_proc_result.stderr = ""
+
+    mock_proc = MagicMock()
+    # TimeoutExpired means the process is still running = boot success
+    mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd="uvicorn", timeout=5)
+    mock_proc.terminate.return_value = None
+
+    with (
+        patch("subprocess.run", return_value=mock_proc_result) as mock_run,
+        patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
+    ):
+        result = TesterAgent().run_tests(files, _make_plan())
+
+    assert result["status"] == "success"
+    assert result["passed_checks"]["install"] is True
+    assert result["passed_checks"]["lint"] is True
+    assert result["passed_checks"]["typecheck"] is True
+    assert result["passed_checks"]["boot"] is True
+
+    # install + lint + typecheck = 3 subprocess.run calls
+    assert mock_run.call_count == 3
+    # boot = 1 Popen call
+    mock_popen.assert_called_once()
+
+    # Verify the python-postgres commands
+    run_cmds = [call.args[0] for call in mock_run.call_args_list]
+    assert any("pip" in " ".join(c) for c in run_cmds)
+    assert any("flake8" in " ".join(c) for c in run_cmds)
+    assert any("mypy" in " ".join(c) for c in run_cmds)
+    boot_cmd = mock_popen.call_args.args[0]
+    assert "uvicorn" in " ".join(boot_cmd)
+
+
+def test_full_pipeline_architect_to_deploy(monkeypatch):
+    """run_full_pipeline flows architect → generate → test → verify → deploy in mock mode."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    sr = _make_sr()
+    blueprint = _make_blueprint()
+    project = _make_project(blueprint)
+
+    generated_files_result = {
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\n@router.post('/api/workouts')\n"
+            "def h(): pass\n"
+        ),
+    }
+
+    plan = GenerationPlan(
+        technology_stack="python-postgres",
+        files=[
+            FileToGenerate(path="backend/app/models.py", description="DB models.", template="db_schema"),
+            FileToGenerate(path="backend/app/routes/workouts.py", description="Routes.", template="fastapi_route"),
+        ],
+        generation_order=["backend/app/models.py", "backend/app/routes/workouts.py"],
+        notes="",
+    )
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
+        patch("app.services.firestore_service.update_project"),
+        patch("app.services.firestore_service.set_project_status"),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=plan),
+        patch(
+            "app.ai.claude.agents.generator.GeneratorAgent.generate_file",
+            side_effect=lambda ftg, *a, **kw: generated_files_result.get(ftg.path, "# mock\n"),
+        ),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+
+        result = GenerationOrchestrator().run_full_pipeline("uid123", "proj-test")
+
+    assert result["status"] == "success"
+    assert len(result["generated_files"]) == 2
+    assert result["deployment_url"] is not None
+    assert result["errors"] == []

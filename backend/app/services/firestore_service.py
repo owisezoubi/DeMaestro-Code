@@ -91,9 +91,22 @@ def update_project(uid: str, project_id: str, fields: dict) -> None:
 
 
 def delete_project(uid: str, project_id: str) -> None:
-    """NOTE: this only deletes the project doc, not subcollections.
-    Full cascade is left for a later improvement (Week 6 polish)."""
-    _project_doc(uid, project_id).delete()
+    """Delete project document and all known subcollections."""
+    project_ref = _project_doc(uid, project_id)
+    subcollections = [
+        "raw_inputs",
+        "structured_requirements",
+        "clarifications",
+        "summary_documents",
+        "blueprints",
+        "ai_calls",
+        "verification_logs",
+        "exports",
+    ]
+    for subcol in subcollections:
+        for doc in project_ref.collection(subcol).stream():
+            doc.reference.delete()
+    project_ref.delete()
 
 
 # ---------- Raw inputs ----------

@@ -125,11 +125,21 @@ class GenerationOrchestrator:
             plan = self.architect.architect(sr, blueprint)
             log.info("pipeline.architect.done", project_id=project_id, num_files=len(plan.files))
 
+            firestore_service.update_project(uid, project_id, {
+                "total_files": len(plan.files),
+                "generated_count": 0,
+                "current_stage": "generating",
+            })
+
             generated_files: dict[str, str] = {}
-            for file_path in plan.generation_order:
+            for idx, file_path in enumerate(plan.generation_order):
                 file_to_gen = next((f for f in plan.files if f.path == file_path), None)
                 if file_to_gen is None:
                     continue
+                firestore_service.update_project(uid, project_id, {
+                    "current_file": file_path,
+                    "generated_count": idx,
+                })
                 generated_files[file_path] = self.generator.generate_file(
                     file_to_gen, plan, blueprint, generated_files
                 )
@@ -138,6 +148,8 @@ class GenerationOrchestrator:
                 "generated_files": generated_files,
                 "generation_plan": plan.model_dump(),
                 "status": ProjectStatus.generated,
+                "generated_count": len(generated_files),
+                "current_file": None,
             })
             log.info("pipeline.generate.done", project_id=project_id, num_files=len(generated_files))
 
@@ -147,6 +159,7 @@ class GenerationOrchestrator:
 
             for cycle in range(_MAX_TEST_CYCLES):
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.testing)
+                firestore_service.update_project(uid, project_id, {"current_stage": "testing"})
 
                 test_results = self.tester.run_tests(generated_files, plan)
                 log.info(
@@ -160,6 +173,7 @@ class GenerationOrchestrator:
                     test_passed = True
                     break
 
+                firestore_service.update_project(uid, project_id, {"current_stage": "debugging"})
                 debug_result = self.debugger.debug_and_fix(
                     test_results, generated_files, plan, attempt_count
                 )
@@ -186,6 +200,7 @@ class GenerationOrchestrator:
 
             # ── STEP 3: Verify ───────────────────────────────────────────────
             firestore_service.set_project_status(uid, project_id, ProjectStatus.verifying)
+            firestore_service.update_project(uid, project_id, {"current_stage": "verifying"})
 
             verify_result = self.verifier.verify(generated_files, plan, blueprint)
             log.info("pipeline.verify.done", project_id=project_id, status=verify_result["status"])
@@ -194,6 +209,7 @@ class GenerationOrchestrator:
                 raise RuntimeError(f"Verification failed: {verify_result['issues']}")
 
             firestore_service.set_project_status(uid, project_id, ProjectStatus.verified)
+            firestore_service.update_project(uid, project_id, {"current_stage": "verified"})
 
             # ── STEP 4: Deploy ───────────────────────────────────────────────
             firestore_service.set_project_status(uid, project_id, ProjectStatus.deploying)
@@ -208,6 +224,7 @@ class GenerationOrchestrator:
                 "status": ProjectStatus.deployed,
                 "deployment_url": deploy_result["deployment_url"],
                 "deployment_id": deploy_result["deployment_id"],
+                "current_stage": "deployed",
             })
 
             log.info("pipeline.done", project_id=project_id, deployment_url=deploy_result["deployment_url"])

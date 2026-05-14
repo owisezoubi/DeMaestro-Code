@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard'
 import NewProject from './pages/NewProject'
 import ProjectApproval from './pages/ProjectApproval'
 import ProjectChat from './pages/ProjectChat'
+import ProjectDetail from './pages/ProjectDetail'
 import ProjectGeneration from './pages/ProjectGeneration'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -51,6 +52,14 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ProjectGeneration />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/projects/:id/detail"
+        element={
+          <ProtectedRoute>
+            <ProjectDetail />
           </ProtectedRoute>
         }
       />

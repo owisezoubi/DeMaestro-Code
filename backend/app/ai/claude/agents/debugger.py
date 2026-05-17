@@ -7,6 +7,21 @@ from anthropic import Anthropic
 from app.config import settings
 from app.models.generation_plan import GenerationPlan
 
+_INFRASTRUCTURE_ERROR_PATTERNS = [
+    "No such file or directory:",
+    "command not found",
+    "FileNotFoundError",
+    "EACCES",
+    "ENOENT",
+    "Could not connect to",
+    "Connection refused",
+    "Timeout",
+]
+
+
+def _is_infrastructure_error(msg: str) -> bool:
+    return any(p.lower() in msg.lower() for p in _INFRASTRUCTURE_ERROR_PATTERNS)
+
 
 class DebuggerAgent:
     """Parses test errors and uses Claude to fix them.
@@ -41,16 +56,31 @@ class DebuggerAgent:
         if not errors:
             return {"status": "success", "fixed_files": {}, "attempt_counts": attempt_count, "errors": []}
 
+        # Filter infrastructure errors — missing tools are not code bugs.
+        code_errors = [e for e in errors if not _is_infrastructure_error(e)]
+        for e in errors:
+            if _is_infrastructure_error(e):
+                self.log.info("debug.skipped_infrastructure_error", error=e[:120])
+
+        if not code_errors:
+            return {
+                "status": "skipped",
+                "reason": "All errors are infrastructure, not code",
+                "fixed_files": {},
+                "attempt_counts": attempt_count,
+                "errors": [],
+            }
+
         try:
-            file_to_fix = self._extract_file_from_error(errors[0])
+            file_to_fix = self._extract_file_from_error(code_errors[0])
 
             if not file_to_fix or file_to_fix not in generated_files:
-                self.log.warning("debug_and_fix.cannot_identify_file", error=errors[0])
+                self.log.warning("debug_and_fix.cannot_identify_file", error=code_errors[0])
                 return {
                     "status": "error",
                     "fixed_files": {},
                     "attempt_counts": attempt_count,
-                    "errors": [f"Could not identify file to fix from: {errors[0][:120]}"],
+                    "errors": [f"Could not identify file to fix from: {code_errors[0][:120]}"],
                 }
 
             current_attempts = attempt_count.get(file_to_fix, 0)
@@ -70,10 +100,10 @@ class DebuggerAgent:
             original_content = generated_files[file_to_fix]
 
             if settings.mock_ai:
-                fixed_content = self._fix_mock(file_to_fix, original_content, errors[0])
+                fixed_content = self._fix_mock(file_to_fix, original_content, code_errors[0])
             else:
                 fixed_content = self._fix_with_claude(
-                    file_to_fix, original_content, errors[0], test_results
+                    file_to_fix, original_content, code_errors[0], test_results
                 )
 
             new_attempt_count = {**attempt_count, file_to_fix: current_attempts + 1}

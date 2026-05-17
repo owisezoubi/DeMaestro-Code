@@ -11,6 +11,9 @@ from app.models.generation_plan import GenerationPlan
 
 log = structlog.get_logger("TesterAgent")
 
+# Statuses: "passed", "failed", "skipped"
+# Skipped means the tool was absent; never enters the debug loop.
+
 
 class TesterAgent:
     """Runs install / lint / typecheck / boot checks on generated code.
@@ -23,6 +26,8 @@ class TesterAgent:
         """Run full test suite (install / lint / typecheck / boot).
 
         Returns: { status, errors, logs, passed_checks }
+        passed_checks values are "passed" | "failed" | "skipped".
+        status is "success" when no check is "failed" (skipped is not a failure).
         """
         log.info("test.start", num_files=len(generated_files), stack=plan.technology_stack)
 
@@ -38,22 +43,25 @@ class TesterAgent:
                 "status": "error",
                 "errors": [str(e)],
                 "logs": {},
-                "passed_checks": {"install": False, "lint": False, "typecheck": False, "boot": False},
+                "passed_checks": {
+                    "install": "failed",
+                    "lint": "failed",
+                    "typecheck": "failed",
+                    "boot": "failed",
+                },
             }
 
     # ── mock path ────────────────────────────────────────────────────────────
 
     def _test_mock(self, generated_files: dict[str, str], plan: GenerationPlan) -> dict:
         """In-process checks — no subprocesses, no Docker."""
-        passed_checks: dict[str, bool] = {}
+        passed_checks: dict[str, str] = {}
         logs: dict[str, str] = {}
         errors: list[str] = []
 
-        # install: always passes (can't actually install in mock mode)
-        passed_checks["install"] = True
+        passed_checks["install"] = "passed"
         logs["install"] = "mock: skipped"
 
-        # lint: use ast.parse for Python files, always pass for others
         lint_errors: list[str] = []
         for path, content in generated_files.items():
             if path.endswith(".py"):
@@ -61,19 +69,17 @@ class TesterAgent:
                     ast.parse(content)
                 except SyntaxError as exc:
                     lint_errors.append(f"{path}: SyntaxError at line {exc.lineno}: {exc.msg}")
-        passed_checks["lint"] = not lint_errors
+        passed_checks["lint"] = "failed" if lint_errors else "passed"
         logs["lint"] = "ok" if not lint_errors else "; ".join(lint_errors)
         errors.extend(lint_errors)
 
-        # typecheck: always passes in mock mode
-        passed_checks["typecheck"] = True
+        passed_checks["typecheck"] = "passed"
         logs["typecheck"] = "mock: skipped"
 
-        # boot: always passes in mock mode
-        passed_checks["boot"] = True
+        passed_checks["boot"] = "passed"
         logs["boot"] = "mock: skipped"
 
-        status = "success" if all(passed_checks.values()) else "failed"
+        status = "success" if not errors else "failed"
         log.info("test.mock.done", status=status, passed_checks=passed_checks)
         return {"status": status, "errors": errors, "logs": logs, "passed_checks": passed_checks}
 
@@ -90,95 +96,115 @@ class TesterAgent:
         return tmpdir
 
     def _test_real(self, project_dir: str, stack: str) -> dict:
-        passed_checks: dict[str, bool] = {}
+        passed_checks: dict[str, str] = {}
         logs: dict[str, str] = {}
 
-        install_ok, install_log = self._run_install(project_dir, stack)
-        passed_checks["install"] = install_ok
+        install_status, install_log = self._run_install(project_dir, stack)
+        passed_checks["install"] = install_status
         logs["install"] = install_log
 
-        lint_ok, lint_log = self._run_lint(project_dir, stack)
-        passed_checks["lint"] = lint_ok
+        lint_status, lint_log = self._run_lint(project_dir, stack)
+        passed_checks["lint"] = lint_status
         logs["lint"] = lint_log
 
-        typecheck_ok, typecheck_log = self._run_typecheck(project_dir, stack)
-        passed_checks["typecheck"] = typecheck_ok
+        typecheck_status, typecheck_log = self._run_typecheck(project_dir, stack)
+        passed_checks["typecheck"] = typecheck_status
         logs["typecheck"] = typecheck_log
 
-        boot_ok, boot_log = self._run_boot(project_dir, stack)
-        passed_checks["boot"] = boot_ok
+        boot_status, boot_log = self._run_boot(project_dir, stack)
+        passed_checks["boot"] = boot_status
         logs["boot"] = boot_log
 
+        # Only "failed" checks produce errors; "skipped" is not a failure.
         errors = [
             f"{check}: {logs[check]}"
-            for check, ok in passed_checks.items()
-            if not ok
+            for check, chk_status in passed_checks.items()
+            if chk_status == "failed"
         ]
         status = "success" if not errors else "failed"
         log.info("test.real.done", status=status, passed_checks=passed_checks)
         return {"status": status, "errors": errors, "logs": logs, "passed_checks": passed_checks}
 
-    def _run_install(self, project_dir: str, stack: str) -> tuple[bool, str]:
+    def _run_install(self, project_dir: str, stack: str) -> tuple[str, str]:
+        """Returns (status, log_snippet). status: 'passed' | 'failed' | 'skipped'."""
+        if "python" in stack:
+            cmd = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
+        else:
+            cmd = ["npm", "install"]
         try:
-            if "python" in stack:
-                cmd = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
-            else:
-                cmd = ["npm", "install"]
-            result = subprocess.run(cmd, cwd=project_dir, capture_output=True, timeout=120, text=True)
-            passed = result.returncode == 0
-            log.info("test_install", passed=passed, returncode=result.returncode)
-            return passed, (result.stdout + result.stderr)[:500]
+            result = subprocess.run(
+                cmd, cwd=project_dir, capture_output=True, timeout=120, text=True
+            )
+            status = "passed" if result.returncode == 0 else "failed"
+            log.info("test_install", status=status, returncode=result.returncode)
+            return status, (result.stdout + result.stderr)[:500]
+        except FileNotFoundError:
+            log.warning("test.tool_missing", tool=cmd[0], check="install")
+            return "skipped", f"Tool '{cmd[0]}' not installed"
         except subprocess.TimeoutExpired:
             log.warning("test_install.timeout")
-            return False, "timeout"
+            return "failed", "timeout"
 
-    def _run_lint(self, project_dir: str, stack: str) -> tuple[bool, str]:
+    def _run_lint(self, project_dir: str, stack: str) -> tuple[str, str]:
+        if "python" in stack:
+            cmd = ["flake8", ".", "--max-line-length=120", "--ignore=E501,W503"]
+        else:
+            cmd = ["npx", "eslint", "src/", "--max-warnings=0"]
         try:
-            if "python" in stack:
-                cmd = ["flake8", ".", "--max-line-length=120", "--ignore=E501,W503"]
-            else:
-                cmd = ["npx", "eslint", "src/", "--max-warnings=0"]
-            result = subprocess.run(cmd, cwd=project_dir, capture_output=True, timeout=60, text=True)
-            passed = result.returncode == 0
-            log.info("test_lint", passed=passed)
-            return passed, (result.stdout + result.stderr)[:500]
+            result = subprocess.run(
+                cmd, cwd=project_dir, capture_output=True, timeout=60, text=True
+            )
+            status = "passed" if result.returncode == 0 else "failed"
+            log.info("test_lint", status=status)
+            return status, (result.stdout + result.stderr)[:500]
+        except FileNotFoundError:
+            log.warning("test.tool_missing", tool=cmd[0], check="lint")
+            return "skipped", f"Tool '{cmd[0]}' not installed"
         except subprocess.TimeoutExpired:
             log.warning("test_lint.timeout")
-            return False, "timeout"
+            return "failed", "timeout"
 
-    def _run_typecheck(self, project_dir: str, stack: str) -> tuple[bool, str]:
+    def _run_typecheck(self, project_dir: str, stack: str) -> tuple[str, str]:
+        if "python" in stack:
+            cmd = ["mypy", ".", "--ignore-missing-imports"]
+        else:
+            cmd = ["npm", "run", "typecheck"]
         try:
-            if "python" in stack:
-                cmd = ["mypy", ".", "--ignore-missing-imports"]
-            else:
-                cmd = ["npm", "run", "typecheck"]
-            result = subprocess.run(cmd, cwd=project_dir, capture_output=True, timeout=60, text=True)
-            passed = result.returncode == 0
-            log.info("test_typecheck", passed=passed)
-            return passed, (result.stdout + result.stderr)[:500]
+            result = subprocess.run(
+                cmd, cwd=project_dir, capture_output=True, timeout=60, text=True
+            )
+            status = "passed" if result.returncode == 0 else "failed"
+            log.info("test_typecheck", status=status)
+            return status, (result.stdout + result.stderr)[:500]
+        except FileNotFoundError:
+            log.warning("test.tool_missing", tool=cmd[0], check="typecheck")
+            return "skipped", f"Tool '{cmd[0]}' not installed"
         except subprocess.TimeoutExpired:
             log.warning("test_typecheck.timeout")
-            return False, "timeout"
+            return "failed", "timeout"
 
-    def _run_boot(self, project_dir: str, stack: str) -> tuple[bool, str]:
+    def _run_boot(self, project_dir: str, stack: str) -> tuple[str, str]:
+        if "python" in stack:
+            cmd = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+        else:
+            cmd = ["npm", "run", "dev"]
         try:
-            if "python" in stack:
-                cmd = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
-            else:
-                cmd = ["npm", "run", "dev"]
             proc = subprocess.Popen(
                 cmd, cwd=project_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
             try:
                 proc.wait(timeout=5)
-                passed = False  # exited early = crash
+                status = "failed"
                 output = "process exited early"
             except subprocess.TimeoutExpired:
-                passed = True  # still running = boot ok
+                status = "passed"
                 proc.terminate()
                 output = "booted ok"
-            log.info("test_boot", passed=passed)
-            return passed, output
+            log.info("test_boot", status=status)
+            return status, output
+        except FileNotFoundError:
+            log.warning("test.tool_missing", tool=cmd[0], check="boot")
+            return "skipped", f"Tool '{cmd[0]}' not installed"
         except Exception as exc:
             log.error("test_boot.error", error=str(exc))
-            return False, str(exc)
+            return "failed", str(exc)

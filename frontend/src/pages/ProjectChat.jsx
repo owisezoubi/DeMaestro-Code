@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -45,12 +45,21 @@ export default function ProjectChat() {
 
   const status = statusData?.status
 
-  const { data: clarifications = [] } = useQuery({
+  const { data: clarifications = [], isLoading: clarificationsLoading } = useQuery({
     queryKey: ['clarifications', projectId],
     queryFn: () => getClarifications(projectId),
+    refetchInterval: (query) => {
+      if (!query.state.data?.length || status !== 'clarifying') return false
+      return 3000
+    },
     enabled: status === 'clarifying',
-    refetchInterval: status === 'clarifying' ? 2000 : false,
   })
+
+  useEffect(() => {
+    return () => {
+      qc.cancelQueries({ queryKey: ['clarifications', projectId] })
+    }
+  }, [projectId, qc])
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -79,6 +88,7 @@ export default function ProjectChat() {
           status={status}
           projectId={projectId}
           clarifications={clarifications}
+          clarificationsLoading={clarificationsLoading}
           qc={qc}
           navigate={navigate}
         />
@@ -87,7 +97,7 @@ export default function ProjectChat() {
   )
 }
 
-function MainContent({ status, projectId, clarifications, qc, navigate }) {
+function MainContent({ status, projectId, clarifications, clarificationsLoading, qc, navigate }) {
   if (!status) {
     return (
       <div className="card flex items-center gap-3 text-slate-500">
@@ -120,12 +130,20 @@ function MainContent({ status, projectId, clarifications, qc, navigate }) {
 
   if (status === 'clarifying') {
     return (
-      <ClarificationCard
-        key={clarifications[0]?.id ?? 'loading'}
-        clarifications={clarifications}
-        projectId={projectId}
-        qc={qc}
-      />
+      <div className="space-y-4">
+        {clarificationsLoading && (
+          <div className="p-4 bg-blue-50 rounded">
+            <p>Processing your answer...</p>
+            <p className="text-sm text-gray-600">This may take 30-60 seconds</p>
+          </div>
+        )}
+        <ClarificationCard
+          key={clarifications[0]?.id ?? 'none'}
+          clarifications={clarifications}
+          projectId={projectId}
+          qc={qc}
+        />
+      </div>
     )
   }
 
@@ -192,7 +210,6 @@ function FailedCard({ projectId, qc }) {
 
 function ClarificationCard({ clarifications, projectId, qc }) {
   const [freeText, setFreeText] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
 
   const answerMut = useMutation({
     mutationFn: ({ ambiguityId, answer }) =>
@@ -200,16 +217,25 @@ function ClarificationCard({ clarifications, projectId, qc }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['clarifications', projectId] })
       qc.invalidateQueries({ queryKey: ['project-status', projectId] })
+    },
+    onSettled: () => {
       setFreeText('')
     },
     onError: (err) => {
-      toast.error(err.friendlyMessage || 'Failed to submit answer. Please try again.')
-      setIsSubmitting(false)
+      const msg = err.friendlyMessage || err.message || ''
+      const isTimeout =
+        err.response?.status === 504 ||
+        err.code === 'ECONNABORTED' ||
+        msg.toLowerCase().includes('timeout')
+      if (isTimeout) {
+        toast.info('Still processing — this can take 1–2 minutes')
+      } else {
+        toast.error(msg || 'Failed to submit answer. Please try again.')
+      }
     },
   })
 
   function submit(answer) {
-    setIsSubmitting(true)
     answerMut.mutate({ ambiguityId: clarifications[0].id, answer })
   }
 
@@ -222,7 +248,7 @@ function ClarificationCard({ clarifications, projectId, qc }) {
     )
   }
 
-  if (isSubmitting) {
+  if (answerMut.isPending) {
     return (
       <div className="card flex flex-col items-center py-12 text-center">
         <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />

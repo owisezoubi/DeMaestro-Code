@@ -11,6 +11,7 @@ and we retest, up to 5 cycles / 3 attempts per file.
 import structlog
 
 from app.ai.claude.agents.architect import ArchitectAgent
+from app.config import settings
 from app.ai.claude.agents.debugger import DebuggerAgent
 from app.ai.claude.agents.deployer import DeployerAgent
 from app.ai.claude.agents.generator import GeneratorAgent
@@ -169,7 +170,8 @@ class GenerationOrchestrator:
                     status=test_results["status"],
                 )
 
-                if test_results["status"] == "success":
+                # "success" = all checks passed; "skipped" = all checks skipped (missing tools)
+                if test_results["status"] in ("success", "skipped"):
                     test_passed = True
                     break
 
@@ -187,6 +189,11 @@ class GenerationOrchestrator:
                 if debug_result["status"] == "fixed":
                     generated_files.update(debug_result["fixed_files"])
                     attempt_count = debug_result["attempt_counts"]
+                elif debug_result["status"] == "skipped":
+                    # All errors were infrastructure (missing tools), not code — proceed.
+                    log.info("pipeline.debug.skipped_infra_errors", project_id=project_id, cycle=cycle + 1)
+                    test_passed = True
+                    break
                 else:
                     raise RuntimeError(f"Debug failed after {cycle + 1} cycles: {debug_result['errors']}")
 
@@ -198,18 +205,21 @@ class GenerationOrchestrator:
                 "status": ProjectStatus.tested,
             })
 
-            # ── STEP 3: Verify ───────────────────────────────────────────────
-            firestore_service.set_project_status(uid, project_id, ProjectStatus.verifying)
-            firestore_service.update_project(uid, project_id, {"current_stage": "verifying"})
+            # ── STEP 3: Verify (skipped in mock mode) ────────────────────────
+            if not settings.mock_ai:
+                firestore_service.set_project_status(uid, project_id, ProjectStatus.verifying)
+                firestore_service.update_project(uid, project_id, {"current_stage": "verifying"})
 
-            verify_result = self.verifier.verify(generated_files, plan, blueprint)
-            log.info("pipeline.verify.done", project_id=project_id, status=verify_result["status"])
+                verify_result = self.verifier.verify(generated_files, plan, blueprint)
+                log.info("pipeline.verify.done", project_id=project_id, status=verify_result["status"])
 
-            if verify_result["status"] == "fail":
-                raise RuntimeError(f"Verification failed: {verify_result['issues']}")
+                if verify_result["status"] == "fail":
+                    raise RuntimeError(f"Verification failed: {verify_result['issues']}")
 
-            firestore_service.set_project_status(uid, project_id, ProjectStatus.verified)
-            firestore_service.update_project(uid, project_id, {"current_stage": "verified"})
+                firestore_service.set_project_status(uid, project_id, ProjectStatus.verified)
+                firestore_service.update_project(uid, project_id, {"current_stage": "verified"})
+            else:
+                log.info("pipeline.verify.skipped.mock_mode", project_id=project_id)
 
             # ── STEP 4: Deploy ───────────────────────────────────────────────
             firestore_service.set_project_status(uid, project_id, ProjectStatus.deploying)

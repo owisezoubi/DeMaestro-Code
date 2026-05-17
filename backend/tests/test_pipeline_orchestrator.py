@@ -65,7 +65,7 @@ def test_kick_off_structuring_in_mock_mode_does_not_crash(monkeypatch):
         mock_add_sr.assert_called_once()
 
 
-def test_force_finish_after_three_rounds_clears_remaining_ambiguities():
+def test_force_finish_at_round_3_clears_ambiguities():
     current_sr = _make_sr(
         ambiguities=[
             AmbiguityFlag(
@@ -121,6 +121,8 @@ def test_round_1_trims_to_max_2_ambiguities():
     with (
         patch("app.services.firestore_service.get_latest_structured_requirements", return_value=current_sr),
         patch("app.services.firestore_service.increment_clarification_round", return_value=1),
+        patch("app.services.firestore_service.get_resolved_topics", return_value=[]),
+        patch("app.services.firestore_service.add_resolved_topic"),
         patch("app.services.firestore_service.add_structured_requirements") as mock_add_sr,
         patch("app.services.firestore_service.add_clarification_turn"),
         patch("app.services.firestore_service.set_project_status"),
@@ -155,6 +157,8 @@ def test_orchestrator_generates_summary_blueprint_when_clarifications_complete()
     with (
         patch("app.services.firestore_service.get_latest_structured_requirements", return_value=current_sr),
         patch("app.services.firestore_service.increment_clarification_round", return_value=1),
+        patch("app.services.firestore_service.get_resolved_topics", return_value=[]),
+        patch("app.services.firestore_service.add_resolved_topic"),
         patch("app.services.firestore_service.add_structured_requirements"),
         patch("app.services.firestore_service.add_clarification_turn"),
         patch("app.services.firestore_service.set_project_status"),

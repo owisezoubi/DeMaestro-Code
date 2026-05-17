@@ -58,6 +58,7 @@ class ProjectMeta(BaseModel):
     deployment_id: Optional[str] = None
     error_message: Optional[str] = None
     last_error: Optional[str] = None  # transient error (e.g. clarification failed); project stays retryable
+    resolved_topics: list[str] = []
     last_change_request: Optional[str] = None
     modification_round: Optional[int] = None
     modification_round_completed: Optional[int] = None

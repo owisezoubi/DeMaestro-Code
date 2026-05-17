@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Markdown from 'react-markdown'
@@ -21,6 +21,14 @@ export default function ProjectApproval() {
     queryFn: () => getProject(projectId),
     refetchInterval: (query) => (query.state.data?.summary ? false : 3000),
   })
+
+  // When the page loads with awaiting_approval but summary/blueprint not yet written,
+  // force an immediate refetch rather than waiting for the next poll interval.
+  useEffect(() => {
+    if (project?.status === 'awaiting_approval' && (!project?.summary || !project?.blueprint)) {
+      qc.invalidateQueries({ queryKey: ['project', projectId] })
+    }
+  }, [project?.status, projectId, qc])
 
   const approveMut = useMutation({
     mutationFn: () => approveProject(projectId),

@@ -3,6 +3,7 @@
 Each pipeline stage runs in a daemon thread so the HTTP request returns
 immediately and Firestore status is updated as work progresses.
 """
+import re
 import threading
 
 import structlog
@@ -15,7 +16,18 @@ from app.services import firestore_service
 log = structlog.get_logger(__name__)
 
 _INITIAL_AMBIGUITY_CAP = 3
+_MAX_CLARIFICATION_ROUNDS = 3
 _ROUND_CAP = {1: 2, 2: 1}
+
+
+# ---------- Topic dedup helpers ----------
+
+def _canonical_topic(field_path: str) -> str:
+    """Normalize a field_path to a canonical topic key.
+
+    Strips array indices so 'entities[0].fields' becomes 'entities.fields'.
+    """
+    return re.sub(r'\[\d+\]', '', field_path)
 
 
 # ---------- Summary + Blueprint generation ----------
@@ -130,12 +142,13 @@ def _run_apply_clarification(
 
         new_round = firestore_service.increment_clarification_round(uid, project_id)
 
-        if new_round >= 3:
+        if new_round >= _MAX_CLARIFICATION_ROUNDS:
             log.warning(
-                "forced_finish_after_three_rounds",
+                "forced_finish_max_rounds_reached",
                 uid=uid,
                 project_id=project_id,
                 new_round=new_round,
+                max_rounds=_MAX_CLARIFICATION_ROUNDS,
             )
             updated = current.model_copy(
                 update={"ambiguities": [], "version": current.version + 1}
@@ -143,12 +156,30 @@ def _run_apply_clarification(
             firestore_service.add_structured_requirements(uid, project_id, updated)
             firestore_service.add_clarification_turn(uid, project_id, ambiguity_id, question, answer)
             firestore_service.set_project_status(uid, project_id, ProjectStatus.awaiting_approval)
-            # Clarifications are done — generate summary + blueprint now.
             _generate_and_store_summary_blueprint(uid, project_id)
             return
 
+        # --- Resolved-topic dedup ---
+        # Record the topic being answered so it won't be re-asked.
+        answered_flag = next((a for a in current.ambiguities if a.id == ambiguity_id), None)
+        try:
+            resolved_topics = firestore_service.get_resolved_topics(uid, project_id)
+        except Exception:
+            resolved_topics = []
+
+        if answered_flag:
+            canonical = _canonical_topic(answered_flag.field_path)
+            try:
+                firestore_service.add_resolved_topic(uid, project_id, canonical)
+            except Exception:
+                pass  # best-effort; dedup is non-critical
+            if canonical not in resolved_topics:
+                resolved_topics = resolved_topics + [canonical]
+
         coordinator = RequirementsCoordinator()
-        updated = coordinator.apply_clarification(current, ambiguity_id, answer)
+        updated = coordinator.apply_clarification(
+            current, ambiguity_id, answer, resolved_topics=resolved_topics
+        )
 
         round_cap = _ROUND_CAP.get(new_round)
         if round_cap is not None and len(updated.ambiguities) > round_cap:

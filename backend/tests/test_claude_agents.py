@@ -185,10 +185,10 @@ def test_tester_mock_mode_all_checks_pass(monkeypatch):
     result = TesterAgent().run_tests(files, _make_plan())
 
     assert result["status"] == "success"
-    assert result["passed_checks"]["install"] is True
-    assert result["passed_checks"]["lint"] is True
-    assert result["passed_checks"]["typecheck"] is True
-    assert result["passed_checks"]["boot"] is True
+    assert result["passed_checks"]["install"] == "passed"
+    assert result["passed_checks"]["lint"] == "passed"
+    assert result["passed_checks"]["typecheck"] == "passed"
+    assert result["passed_checks"]["boot"] == "passed"
 
 
 def test_tester_mock_mode_four_checks_present(monkeypatch):
@@ -210,7 +210,7 @@ def test_tester_detects_syntax_errors(monkeypatch):
     result = TesterAgent().run_tests(files, _make_plan())
 
     assert result["status"] == "failed"
-    assert result["passed_checks"]["lint"] is False
+    assert result["passed_checks"]["lint"] == "failed"
     assert any("workouts.py" in e for e in result["errors"])
 
 
@@ -222,7 +222,7 @@ def test_tester_non_python_files_do_not_fail_lint(monkeypatch):
     files = {"frontend/src/App.jsx": "const x = <div>; not real jsx"}
     result = TesterAgent().run_tests(files, _make_plan())
 
-    assert result["passed_checks"]["lint"] is True
+    assert result["passed_checks"]["lint"] == "passed"
 
 
 # ── DebuggerAgent ─────────────────────────────────────────────────────────────
@@ -236,7 +236,7 @@ def test_debugger_fixes_one_file_per_attempt(monkeypatch):
         "status": "failed",
         "errors": ["backend/app/routes/workouts.py: SyntaxError at line 1: invalid syntax"],
         "logs": {"lint": "error"},
-        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+        "passed_checks": {"install": "passed", "lint": "failed", "typecheck": "passed", "boot": "passed"},
     }
     generated_files = {"backend/app/routes/workouts.py": "def broken("}
 
@@ -257,7 +257,7 @@ def test_debugger_mock_fix_prepends_comment(monkeypatch):
         "status": "failed",
         "errors": ["backend/app/models.py: SyntaxError at line 3: unexpected EOF"],
         "logs": {},
-        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+        "passed_checks": {"install": "passed", "lint": "failed", "typecheck": "passed", "boot": "passed"},
     }
     original = "class Model:\n    pass\n"
     generated_files = {"backend/app/models.py": original}
@@ -278,7 +278,7 @@ def test_debugger_respects_3_attempt_cap(monkeypatch):
         "status": "failed",
         "errors": ["backend/app/routes/workouts.py: SyntaxError at line 1: invalid syntax"],
         "logs": {},
-        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+        "passed_checks": {"install": "passed", "lint": "failed", "typecheck": "passed", "boot": "passed"},
     }
     generated_files = {"backend/app/routes/workouts.py": "def broken("}
     # already at max attempts
@@ -512,11 +512,10 @@ def test_orchestrator_full_pipeline_architect_to_deploy(monkeypatch):
     assert result["deployment_url"] is not None
     assert result["errors"] == []
 
-    # Verify state transitions occurred
+    # Verify state transitions occurred (verifying is skipped in mock mode)
     set_statuses = [call.args[2] for call in mock_set_status.call_args_list]
     assert ProjectStatus.generating in set_statuses
     assert ProjectStatus.testing in set_statuses
-    assert ProjectStatus.verifying in set_statuses
     assert ProjectStatus.deploying in set_statuses
 
     # Final update should include deployed + deployment_url
@@ -548,13 +547,13 @@ def test_orchestrator_full_pipeline_debug_loop_fires_on_test_failure(monkeypatch
         "status": "failed",
         "errors": ["backend/app/models.py: SyntaxError at line 1: invalid syntax"],
         "logs": {"lint": "error"},
-        "passed_checks": {"install": True, "lint": False, "typecheck": True, "boot": True},
+        "passed_checks": {"install": "passed", "lint": "failed", "typecheck": "passed", "boot": "passed"},
     }
     pass_result = {
         "status": "success",
         "errors": [],
         "logs": {"install": "ok", "lint": "ok", "typecheck": "ok", "boot": "ok"},
-        "passed_checks": {"install": True, "lint": True, "typecheck": True, "boot": True},
+        "passed_checks": {"install": "passed", "lint": "passed", "typecheck": "passed", "boot": "passed"},
     }
 
     call_count = {"n": 0}
@@ -607,10 +606,10 @@ def test_tester_runs_install_lint_typecheck_boot(monkeypatch):
         result = TesterAgent().run_tests(files, _make_plan())
 
     assert result["status"] == "success"
-    assert result["passed_checks"]["install"] is True
-    assert result["passed_checks"]["lint"] is True
-    assert result["passed_checks"]["typecheck"] is True
-    assert result["passed_checks"]["boot"] is True
+    assert result["passed_checks"]["install"] == "passed"
+    assert result["passed_checks"]["lint"] == "passed"
+    assert result["passed_checks"]["typecheck"] == "passed"
+    assert result["passed_checks"]["boot"] == "passed"
 
     # install + lint + typecheck = 3 subprocess.run calls
     assert mock_run.call_count == 3

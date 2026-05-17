@@ -1,5 +1,8 @@
 """Structuring and clarification endpoints (W3-B)."""
+import asyncio
+
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.auth.dependencies import CurrentUser
@@ -83,7 +86,6 @@ async def get_clarifications(project_id: str, user: CurrentUser):
 
 @router.post(
     "/{project_id}/clarifications/{ambiguity_id}/answer",
-    status_code=status.HTTP_202_ACCEPTED,
 )
 async def answer_clarification(
     project_id: str,
@@ -91,7 +93,7 @@ async def answer_clarification(
     payload: AnswerPayload,
     user: CurrentUser,
 ):
-    """Submit an answer to one ambiguity flag and apply it in the background."""
+    """Submit an answer to one ambiguity flag with a 5-minute safety-net timeout."""
     project = _require_project(user.uid, project_id)
 
     if project.status != ProjectStatus.clarifying:
@@ -114,7 +116,24 @@ async def answer_clarification(
             detail=f"Ambiguity '{ambiguity_id}' not found",
         )
 
-    pipeline.apply_clarification_in_background(
-        user.uid, project_id, ambiguity_id, flag.reason, payload.answer
-    )
-    return {"project_id": project_id, "status": "applying_clarification"}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                pipeline._run_apply_clarification,
+                user.uid, project_id, ambiguity_id, flag.reason, payload.answer,
+            ),
+            timeout=300,
+        )
+    except asyncio.TimeoutError:
+        firestore_service.update_project(
+            user.uid, project_id, {"last_error": "Clarification processing timeout"}
+        )
+        return JSONResponse(
+            status_code=504,
+            content={
+                "detail": "AI processing taking longer than expected — your answer may still be applied",
+                "status": "still_processing",
+            },
+        )
+
+    return {"project_id": project_id, "status": "applied_clarification"}

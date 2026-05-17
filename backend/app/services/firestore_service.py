@@ -194,6 +194,22 @@ def add_clarification_turn(
     return turn_id
 
 
+def add_resolved_topic(uid: str, project_id: str, topic: str) -> None:
+    """Atomically append a resolved topic. ArrayUnion drops duplicates."""
+    _project_doc(uid, project_id).update({
+        "resolved_topics": _fs.ArrayUnion([topic]),
+        "updated_at": datetime.now(timezone.utc),
+    })
+
+
+def get_resolved_topics(uid: str, project_id: str) -> list[str]:
+    """Return the list of canonical topics already resolved for this project."""
+    snap = _project_doc(uid, project_id).get()
+    if not snap.exists:
+        return []
+    return snap.to_dict().get("resolved_topics", [])
+
+
 def list_clarification_turns(uid: str, project_id: str) -> list[dict]:
     """Return all clarification turns for a project, oldest first."""
     snaps = _clarifications_col(uid, project_id).order_by("timestamp").stream()

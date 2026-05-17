@@ -29,6 +29,7 @@ export async function answerClarification(projectId, ambiguityId, answer) {
   const r = await api.post(
     `/projects/${projectId}/clarifications/${ambiguityId}/answer`,
     { answer },
+    { timeout: 300000 },
   )
   return r.data
 }

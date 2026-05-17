@@ -1,4 +1,6 @@
 """RequirementsCoordinator — orchestrates all Gemini agents."""
+import concurrent.futures
+import re
 from typing import Optional
 
 import structlog
@@ -10,6 +12,23 @@ from app.ai.gemini.agents.completeness import CompletenessAgent
 from app.ai.gemini.agents.summary import SummaryAgent
 from app.ai.gemini.agents.validator import ValidatorAgent
 from app.models.structured_requirements import AmbiguityFlag, StructuredRequirements
+
+
+def _is_resolved_topic(field_path: str, resolved_topics: list[str]) -> bool:
+    """Return True if field_path is covered by a previously resolved topic.
+
+    Matching rule: strip array indices from field_path, then check whether
+    the first dot-segment of any resolved topic matches the start of the
+    canonical path.  Examples:
+      resolved "auth.method"  →  prefix "auth."  →  filters "auth.providers"
+      resolved "notifications"  →  prefix "notifications."  →  filters "notifications.email"
+    """
+    canonical = re.sub(r'\[\d+\]', '', field_path)
+    for topic in resolved_topics:
+        first_segment = topic.split('.')[0]
+        if canonical == topic or canonical == first_segment or canonical.startswith(first_segment + '.'):
+            return True
+    return False
 
 
 class RequirementsCoordinator:
@@ -39,11 +58,32 @@ class RequirementsCoordinator:
         current: StructuredRequirements,
         ambiguity_id: str,
         answer: str,
+        resolved_topics: list[str] | None = None,
     ) -> StructuredRequirements:
         self.log.info("coordinator.apply_clarification.start", ambiguity_id=ambiguity_id)
         updated = self.clarification.apply_answer(current, ambiguity_id, answer)
-        updated = self.validator.validate(updated)
-        updated = self.completeness.validate(updated)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_validator = executor.submit(self.validator.validate, updated)
+            future_completeness = executor.submit(self.completeness.validate, updated)
+            updated = future_validator.result(timeout=60)
+            updated = future_completeness.result(timeout=60)
+
+        # Dedup: drop any newly-generated ambiguity whose topic was already resolved.
+        if resolved_topics:
+            before = len(updated.ambiguities)
+            filtered = [
+                a for a in updated.ambiguities
+                if not _is_resolved_topic(a.field_path, resolved_topics)
+            ]
+            if len(filtered) < before:
+                self.log.info(
+                    "coordinator.deduped_ambiguities",
+                    removed=before - len(filtered),
+                    resolved_topics=resolved_topics,
+                )
+                updated = updated.model_copy(update={"ambiguities": filtered})
+
         self.log.info(
             "coordinator.apply_clarification.done",
             new_version=updated.version,

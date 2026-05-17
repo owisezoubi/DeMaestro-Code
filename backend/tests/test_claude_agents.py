@@ -611,8 +611,8 @@ def test_tester_runs_install_lint_typecheck_boot(monkeypatch):
     assert result["passed_checks"]["typecheck"] == "passed"
     assert result["passed_checks"]["boot"] == "passed"
 
-    # install + lint + typecheck = 3 subprocess.run calls
-    assert mock_run.call_count == 3
+    # install + ruff_autofix + flake8 + typecheck = 4 subprocess.run calls
+    assert mock_run.call_count == 4
     # boot = 1 Popen call
     mock_popen.assert_called_once()
 

@@ -136,7 +136,14 @@ class TesterAgent:
                 cmd, cwd=project_dir, capture_output=True, timeout=120, text=True
             )
             status = "passed" if result.returncode == 0 else "failed"
-            log.info("test_install", status=status, returncode=result.returncode)
+            log.info(
+                "test_install",
+                status=status,
+                returncode=result.returncode,
+                stdout_tail=result.stdout[-2000:] if result.stdout else "",
+                stderr_tail=result.stderr[-2000:] if result.stderr else "",
+                cmd=" ".join(cmd),
+            )
             return status, (result.stdout + result.stderr)[:500]
         except FileNotFoundError:
             log.warning("test.tool_missing", tool=cmd[0], check="install")
@@ -147,15 +154,33 @@ class TesterAgent:
 
     def _run_lint(self, project_dir: str, stack: str) -> tuple[str, str]:
         if "python" in stack:
-            cmd = ["flake8", ".", "--max-line-length=120", "--ignore=E501,W503"]
+            # Auto-fix cosmetic issues (trailing whitespace, unused imports) before evaluating.
+            try:
+                subprocess.run(
+                    ["ruff", "check", "--fix", "--select", "W,F", "--exit-zero", "."],
+                    cwd=project_dir, capture_output=True, text=True, timeout=30,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                log.warning("test.tool_missing", tool="ruff", check="lint_autofix")
+
+            # Evaluate only on errors that actually break the app (syntax errors, undefined names).
+            cmd = ["flake8", "--select=E9,F63,F7,F82", "--max-line-length=120", "."]
         else:
             cmd = ["npx", "eslint", "src/", "--max-warnings=0"]
+
         try:
             result = subprocess.run(
                 cmd, cwd=project_dir, capture_output=True, timeout=60, text=True
             )
             status = "passed" if result.returncode == 0 else "failed"
-            log.info("test_lint", status=status)
+            log.info(
+                "test_lint",
+                status=status,
+                returncode=result.returncode,
+                stdout_tail=result.stdout[-2000:] if result.stdout else "",
+                stderr_tail=result.stderr[-2000:] if result.stderr else "",
+                cmd=" ".join(cmd),
+            )
             return status, (result.stdout + result.stderr)[:500]
         except FileNotFoundError:
             log.warning("test.tool_missing", tool=cmd[0], check="lint")
@@ -174,7 +199,14 @@ class TesterAgent:
                 cmd, cwd=project_dir, capture_output=True, timeout=60, text=True
             )
             status = "passed" if result.returncode == 0 else "failed"
-            log.info("test_typecheck", status=status)
+            log.info(
+                "test_typecheck",
+                status=status,
+                returncode=result.returncode,
+                stdout_tail=result.stdout[-2000:] if result.stdout else "",
+                stderr_tail=result.stderr[-2000:] if result.stderr else "",
+                cmd=" ".join(cmd),
+            )
             return status, (result.stdout + result.stderr)[:500]
         except FileNotFoundError:
             log.warning("test.tool_missing", tool=cmd[0], check="typecheck")
@@ -192,15 +224,30 @@ class TesterAgent:
             proc = subprocess.Popen(
                 cmd, cwd=project_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
+            out, err = "", ""
             try:
                 proc.wait(timeout=5)
                 status = "failed"
                 output = "process exited early"
+                try:
+                    out, err = proc.communicate(timeout=2)
+                except Exception:
+                    pass
             except subprocess.TimeoutExpired:
                 status = "passed"
                 proc.terminate()
+                try:
+                    out, err = proc.communicate(timeout=2)
+                except Exception:
+                    pass
                 output = "booted ok"
-            log.info("test_boot", status=status)
+            log.info(
+                "test_boot",
+                status=status,
+                stdout_tail=out[-2000:] if out else "",
+                stderr_tail=err[-2000:] if err else "",
+                cmd=" ".join(cmd),
+            )
             return status, output
         except FileNotFoundError:
             log.warning("test.tool_missing", tool=cmd[0], check="boot")

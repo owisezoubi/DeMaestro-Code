@@ -170,6 +170,19 @@ class GenerationOrchestrator:
                     status=test_results["status"],
                 )
 
+                # Surface install failures to Firestore so the frontend can show useful info.
+                if test_results["passed_checks"].get("install") == "failed":
+                    install_log = test_results["logs"].get("install", "")
+                    log.warning(
+                        "pipeline.install_failed",
+                        project_id=project_id,
+                        cycle=cycle + 1,
+                        install_log=install_log,
+                    )
+                    firestore_service.update_project(uid, project_id, {
+                        "last_error": f"Install failed (cycle {cycle + 1}): {install_log[:500]}"
+                    })
+
                 # "success" = all checks passed; "skipped" = all checks skipped (missing tools)
                 if test_results["status"] in ("success", "skipped"):
                     test_passed = True

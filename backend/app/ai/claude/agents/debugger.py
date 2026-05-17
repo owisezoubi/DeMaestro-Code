@@ -18,6 +18,13 @@ _INFRASTRUCTURE_ERROR_PATTERNS = [
     "Timeout",
 ]
 
+# Primary: matches flake8/ruff output lines like `./backend/app/auth.py:225:16: W292 ...`
+_LINT_LINE_RE = re.compile(r"^\s*\./?(?P<path>[\w./\\-]+\.[a-z]+):\d+:\d+:")
+
+# Fallback: matches `path/to/file.py:` references regardless of what follows the colon.
+# Covers both ast.parse-style "file.py: SyntaxError" and "file.py:42" formats.
+_FILE_REF_RE = re.compile(r"(?P<path>[\w./\\-]+\.(?:py|jsx?|tsx?)):")
+
 
 def _is_infrastructure_error(msg: str) -> bool:
     return any(p.lower() in msg.lower() for p in _INFRASTRUCTURE_ERROR_PATTERNS)
@@ -43,7 +50,7 @@ class DebuggerAgent:
         plan: GenerationPlan,
         attempt_count: dict[str, int] | None = None,
     ) -> dict:
-        """Analyze test failures and fix the most critical file.
+        """Analyze test failures and fix all identifiable files.
 
         Returns: { status, fixed_files, attempt_counts, errors }
         """
@@ -72,50 +79,70 @@ class DebuggerAgent:
             }
 
         try:
-            file_to_fix = self._extract_file_from_error(code_errors[0])
+            full_error_text = "\n".join(code_errors)
+            files_to_fix = self._extract_files_from_error(full_error_text)
 
-            if not file_to_fix or file_to_fix not in generated_files:
-                self.log.warning("debug_and_fix.cannot_identify_file", error=code_errors[0])
+            if not files_to_fix:
+                self.log.warning("debug.cannot_identify_file", error=full_error_text[:200])
                 return {
                     "status": "error",
                     "fixed_files": {},
                     "attempt_counts": attempt_count,
-                    "errors": [f"Could not identify file to fix from: {code_errors[0][:120]}"],
+                    "errors": [f"Could not identify any file to fix from: {full_error_text[:120]}"],
                 }
 
-            current_attempts = attempt_count.get(file_to_fix, 0)
-            if current_attempts >= self.MAX_ATTEMPTS_PER_FILE:
-                self.log.warning(
-                    "debug_and_fix.max_attempts_reached", file=file_to_fix, attempts=current_attempts
+            fixed_files: dict[str, str] = {}
+            new_attempt_count = dict(attempt_count)
+
+            for file_to_fix in files_to_fix:
+                if file_to_fix not in generated_files:
+                    self.log.warning("debug_and_fix.file_not_in_generated", file=file_to_fix)
+                    continue
+
+                current_attempts = new_attempt_count.get(file_to_fix, 0)
+                if current_attempts >= self.MAX_ATTEMPTS_PER_FILE:
+                    self.log.warning(
+                        "debug_and_fix.max_attempts_reached",
+                        file=file_to_fix,
+                        attempts=current_attempts,
+                    )
+                    continue
+
+                # Find the most relevant error line for this specific file.
+                error_for_file = next(
+                    (e for e in code_errors if file_to_fix in e), code_errors[0]
                 )
+                original_content = generated_files[file_to_fix]
+
+                if settings.mock_ai:
+                    fixed_content = self._fix_mock(file_to_fix, original_content, error_for_file)
+                else:
+                    fixed_content = self._fix_with_claude(
+                        file_to_fix, original_content, error_for_file, test_results
+                    )
+
+                fixed_files[file_to_fix] = fixed_content
+                new_attempt_count[file_to_fix] = current_attempts + 1
+                self.log.info(
+                    "debug_and_fix.fixed_file",
+                    file=file_to_fix,
+                    attempt=new_attempt_count[file_to_fix],
+                )
+
+            if not fixed_files:
                 return {
                     "status": "error",
                     "fixed_files": {},
-                    "attempt_counts": attempt_count,
+                    "attempt_counts": new_attempt_count,
                     "errors": [
-                        f"Max {self.MAX_ATTEMPTS_PER_FILE} attempts reached for {file_to_fix}"
+                        f"Max {self.MAX_ATTEMPTS_PER_FILE} attempts reached for all identified files"
                     ],
                 }
 
-            original_content = generated_files[file_to_fix]
-
-            if settings.mock_ai:
-                fixed_content = self._fix_mock(file_to_fix, original_content, code_errors[0])
-            else:
-                fixed_content = self._fix_with_claude(
-                    file_to_fix, original_content, code_errors[0], test_results
-                )
-
-            new_attempt_count = {**attempt_count, file_to_fix: current_attempts + 1}
-
-            self.log.info(
-                "debug_and_fix.done",
-                fixed_file=file_to_fix,
-                attempt=new_attempt_count[file_to_fix],
-            )
+            self.log.info("debug_and_fix.done", num_fixed=len(fixed_files))
             return {
                 "status": "fixed",
-                "fixed_files": {file_to_fix: fixed_content},
+                "fixed_files": fixed_files,
                 "attempt_counts": new_attempt_count,
                 "errors": [],
             }
@@ -131,10 +158,22 @@ class DebuggerAgent:
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
-    def _extract_file_from_error(self, error_msg: str) -> str | None:
-        """Heuristic: extract the first file path from an error message."""
-        match = re.search(r"([\w/.-]+\.(?:py|jsx?|tsx?))", error_msg)
-        return match.group(1) if match else None
+    def _extract_files_from_error(self, error_message: str) -> list[str]:
+        """Extract unique file paths from a multi-line lint/error output.
+
+        Primary: flake8/ruff format `./path/to/file.py:line:col: CODE msg`
+        Fallback: simpler `path/to/file.py:line` format from ast.parse errors.
+        """
+        files: set[str] = set()
+        for line in error_message.splitlines():
+            m = _LINT_LINE_RE.match(line)
+            if not m:
+                m = _FILE_REF_RE.search(line)
+            if m:
+                path = m.group("path").lstrip("./")
+                if path:
+                    files.add(path)
+        return sorted(files)
 
     def _fix_mock(self, file_path: str, original_content: str, error_msg: str) -> str:
         """Mock fix: strip the broken line and prepend a correction comment."""

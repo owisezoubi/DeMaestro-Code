@@ -1,6 +1,7 @@
 """TesterAgent — runs tests on generated code. Pure Python, no LLM."""
 import ast
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -138,41 +139,64 @@ class TesterAgent:
         passed_checks: dict[str, str] = {}
         logs: dict[str, str] = {}
 
-        install_status, install_log = self._run_install(tmpdir, stack)
-        passed_checks["install"] = install_status
-        logs["install"] = install_log
+        try:
+            install_status, install_log, venv_python = self._run_install(tmpdir, stack)
+            passed_checks["install"] = install_status
+            logs["install"] = install_log
 
-        lint_status, lint_log = self._run_lint(tmpdir, stack)
-        passed_checks["lint"] = lint_status
-        logs["lint"] = lint_log
+            lint_status, lint_log = self._run_lint(tmpdir, stack)
+            passed_checks["lint"] = lint_status
+            logs["lint"] = lint_log
 
-        typecheck_status, typecheck_log = self._run_typecheck(tmpdir, stack)
-        passed_checks["typecheck"] = typecheck_status
-        logs["typecheck"] = typecheck_log
+            typecheck_status, typecheck_log = self._run_typecheck(tmpdir, stack)
+            passed_checks["typecheck"] = typecheck_status
+            logs["typecheck"] = typecheck_log
 
-        boot_status, boot_log = self._run_boot(tmpdir, stack)
-        passed_checks["boot"] = boot_status
-        logs["boot"] = boot_log
+            boot_status, boot_log = self._run_boot(tmpdir, stack, venv_python=venv_python)
+            passed_checks["boot"] = boot_status
+            logs["boot"] = boot_log
 
-        # Only "failed" checks produce errors; "skipped" is not a failure.
-        errors = [
-            f"{check}: {logs[check]}"
-            for check, chk_status in passed_checks.items()
-            if chk_status == "failed"
-        ]
-        status = "success" if not errors else "failed"
-        log.info("test.real.done", status=status, passed_checks=passed_checks)
-        return {"status": status, "errors": errors, "logs": logs, "passed_checks": passed_checks}
+            # Only "failed" checks produce errors; "skipped" is not a failure.
+            errors = [
+                f"{check}: {logs[check]}"
+                for check, chk_status in passed_checks.items()
+                if chk_status == "failed"
+            ]
+            status = "success" if not errors else "failed"
+            log.info("test.real.done", status=status, passed_checks=passed_checks)
+            return {"status": status, "errors": errors, "logs": logs, "passed_checks": passed_checks}
+        finally:
+            venv_path = tmpdir / ".testenv"
+            if venv_path.exists():
+                shutil.rmtree(venv_path, ignore_errors=True)
 
-    def _run_install(self, tmpdir: Path, stack: str) -> tuple[str, str]:
-        """Returns (status, log_snippet). status: 'passed' | 'failed' | 'skipped'."""
+    def _run_install(self, tmpdir: Path, stack: str) -> tuple[str, str, Optional[Path]]:
+        """Returns (status, log_snippet, venv_python). status: 'passed' | 'failed' | 'skipped'."""
         if "python" in stack:
             backend_dir = _find_backend_dir(tmpdir)
             if backend_dir is None:
                 log.warning("test_install.no_manifest", tmpdir=str(tmpdir))
-                return "skipped", "No Python manifest found"
+                return "skipped", "No Python manifest found", None
 
-            py_cmd = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
+            # Create an isolated venv inside tmpdir so we don't pollute DeMaestro's environment.
+            venv_dir = tmpdir / ".testenv"
+            venv_python: Optional[Path] = None
+            try:
+                subprocess.run(
+                    ["python", "-m", "venv", str(venv_dir)],
+                    capture_output=True, timeout=60, text=True, check=True,
+                )
+                venv_python = venv_dir / "bin" / "python"
+                subprocess.run(
+                    [str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "--quiet"],
+                    capture_output=True, timeout=60, text=True,
+                )
+                py_cmd = [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "--quiet"]
+            except Exception as exc:
+                log.warning("test_install.venv_creation_failed", error=str(exc))
+                venv_python = None
+                py_cmd = ["python", "-m", "pip", "install", "-r", "requirements.txt"]
+
             try:
                 py_result = subprocess.run(
                     py_cmd, cwd=backend_dir, capture_output=True, timeout=120, text=True
@@ -190,10 +214,10 @@ class TesterAgent:
                 py_log = (py_result.stdout + py_result.stderr)[:500]
             except FileNotFoundError:
                 log.warning("test.tool_missing", tool=py_cmd[0], check="install")
-                return "skipped", f"Tool '{py_cmd[0]}' not installed"
+                return "skipped", f"Tool '{py_cmd[0]}' not installed", None
             except subprocess.TimeoutExpired:
                 log.warning("test_install.timeout")
-                return "failed", "timeout"
+                return "failed", "timeout", None
 
             # For full-stack projects (python-postgres), also install frontend deps if present.
             if stack == "python-postgres":
@@ -215,19 +239,19 @@ class TesterAgent:
                         )
                         if npm_status == "failed":
                             fe_log = (npm_result.stdout + npm_result.stderr)[:500]
-                            return "failed", f"{py_log}\n[frontend] {fe_log}"
+                            return "failed", f"{py_log}\n[frontend] {fe_log}", venv_python
                     except FileNotFoundError:
                         log.warning("test.tool_missing", tool="npm", check="install_frontend")
                     except subprocess.TimeoutExpired:
                         log.warning("test_install_frontend.timeout")
 
-            return py_status, py_log
+            return py_status, py_log, venv_python
 
         else:  # node-mongo
             frontend_dir = _find_frontend_dir(tmpdir)
             if frontend_dir is None:
                 log.warning("test_install.no_manifest", tmpdir=str(tmpdir))
-                return "skipped", "No Node.js manifest found"
+                return "skipped", "No Node.js manifest found", None
             cmd = ["npm", "install"]
             try:
                 result = subprocess.run(
@@ -243,13 +267,13 @@ class TesterAgent:
                     stderr_tail=result.stderr[-2000:] if result.stderr else "",
                     cmd=" ".join(cmd),
                 )
-                return status, (result.stdout + result.stderr)[:500]
+                return status, (result.stdout + result.stderr)[:500], None
             except FileNotFoundError:
                 log.warning("test.tool_missing", tool=cmd[0], check="install")
-                return "skipped", f"Tool '{cmd[0]}' not installed"
+                return "skipped", f"Tool '{cmd[0]}' not installed", None
             except subprocess.TimeoutExpired:
                 log.warning("test_install.timeout")
-                return "failed", "timeout"
+                return "failed", "timeout", None
 
     def _run_lint(self, tmpdir: Path, stack: str) -> tuple[str, str]:
         if "python" in stack:
@@ -328,14 +352,17 @@ class TesterAgent:
             log.warning("test_typecheck.timeout")
             return "failed", "timeout"
 
-    def _run_boot(self, tmpdir: Path, stack: str) -> tuple[str, str]:
+    def _run_boot(self, tmpdir: Path, stack: str, venv_python: Optional[Path] = None) -> tuple[str, str]:
         if "python" in stack:
             backend_dir = _find_backend_dir(tmpdir)
             if backend_dir is None:
                 log.warning("test_boot.no_backend", tmpdir=str(tmpdir))
                 return "skipped", "No Python project root found"
             cwd = backend_dir
-            cmd = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+            if venv_python is not None and venv_python.exists():
+                cmd = [str(venv_python), "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+            else:
+                cmd = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
         else:
             frontend_dir = _find_frontend_dir(tmpdir)
             if frontend_dir is None:

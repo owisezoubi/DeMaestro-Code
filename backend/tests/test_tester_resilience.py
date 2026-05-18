@@ -1,4 +1,5 @@
 """Tests for TesterAgent/DebuggerAgent resilience and directory discovery."""
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -86,10 +87,13 @@ def test_install_uses_discovered_backend_dir(tmp_path, monkeypatch):
     ):
         TesterAgent()._test_real(str(tmp_path), "python-sqlite")
 
-    pip_calls = [c for c in mock_run.call_args_list if "pip" in " ".join(c.args[0])]
-    assert len(pip_calls) == 1, "Expected exactly one pip install call"
-    assert pip_calls[0].kwargs["cwd"] == backend_dir, (
-        f"pip should run from {backend_dir}, got {pip_calls[0].kwargs['cwd']}"
+    pip_install_calls = [
+        c for c in mock_run.call_args_list
+        if "requirements.txt" in " ".join(str(a) for a in c.args[0])
+    ]
+    assert len(pip_install_calls) == 1, "Expected exactly one pip install -r requirements.txt call"
+    assert pip_install_calls[0].kwargs["cwd"] == backend_dir, (
+        f"pip should run from {backend_dir}, got {pip_install_calls[0].kwargs['cwd']}"
     )
 
 
@@ -238,3 +242,77 @@ def test_lint_passes_when_only_warnings(monkeypatch):
     assert result["passed_checks"]["lint"] == "passed", (
         "W-class and F401 warnings must not fail lint with --select=E9,F63,F7,F82"
     )
+
+
+# ── isolated venv ─────────────────────────────────────────────────────────────
+
+
+def test_install_creates_isolated_venv(tmp_path):
+    """_run_install creates a .testenv venv in tmpdir before installing requirements."""
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "requirements.txt").write_text("fastapi\n")
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result) as mock_run:
+        _, _, venv_python = TesterAgent()._run_install(tmp_path, "python-sqlite")
+
+    venv_calls = [
+        c for c in mock_run.call_args_list
+        if "venv" in c.args[0]
+    ]
+    assert len(venv_calls) == 1, "Expected exactly one python -m venv call"
+    assert str(tmp_path / ".testenv") in " ".join(str(a) for a in venv_calls[0].args[0])
+
+    assert venv_python is not None
+    assert str(venv_python) == str(tmp_path / ".testenv" / "bin" / "python")
+
+
+def test_boot_uses_venv_python_not_system_python(tmp_path):
+    """_run_boot uses the venv python binary when the venv path exists."""
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "requirements.txt").write_text("fastapi\n")
+
+    venv_python = tmp_path / ".testenv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.touch()
+
+    proc_mock = MagicMock()
+    proc_mock.wait.side_effect = subprocess.TimeoutExpired(cmd="uvicorn", timeout=5)
+    proc_mock.communicate.return_value = ("", "")
+
+    with patch("subprocess.Popen", return_value=proc_mock) as mock_popen:
+        status, _ = TesterAgent()._run_boot(tmp_path, "python-sqlite", venv_python=venv_python)
+
+    assert status == "passed"
+    cmd = mock_popen.call_args.args[0]
+    assert cmd[0] == str(venv_python), f"Expected venv python as first arg, got {cmd[0]}"
+    assert "-m" in cmd
+    assert "uvicorn" in cmd
+
+
+def test_install_falls_back_to_system_pip_when_venv_creation_fails(tmp_path):
+    """When venv creation fails, _run_install falls back to system pip and sets venv_python=None."""
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "requirements.txt").write_text("fastapi\n")
+
+    def _selective_run(cmd, **kwargs):
+        if "venv" in cmd:
+            raise FileNotFoundError("python not found")
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "ok"
+        r.stderr = ""
+        return r
+
+    with patch("subprocess.run", side_effect=_selective_run):
+        status, _, venv_python = TesterAgent()._run_install(tmp_path, "python-sqlite")
+
+    assert venv_python is None, "Fallback path must not set venv_python"
+    assert status == "passed"

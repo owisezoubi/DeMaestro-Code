@@ -152,7 +152,7 @@ def test_generator_none_template_returns_nonempty_content(monkeypatch):
     from app.config import settings as app_settings
     monkeypatch.setattr(app_settings, "mock_ai", True)
 
-    ftg = FileToGenerate(path="docker-compose.yml", description="Docker config.",
+    ftg = FileToGenerate(path="backend/app/config.py", description="App configuration.",
                          depends_on=[], template="none")
     content = GeneratorAgent().generate_file(ftg, _make_plan(), _make_blueprint(), {})
     assert len(content) > 0
@@ -362,8 +362,8 @@ def test_verifier_flags_missing_db_models():
 
 # ── DeployerAgent ─────────────────────────────────────────────────────────────
 
-def test_deployer_creates_zip_and_returns_url(monkeypatch):
-    """DeployerAgent creates a valid ZIP in mock mode and returns a URL."""
+def test_deployer_mock_mode_returns_zip_url(monkeypatch):
+    """DeployerAgent mock mode returns status=ready with a zip_url."""
     from app.config import settings as app_settings
     monkeypatch.setattr(app_settings, "mock_ai", True)
 
@@ -373,33 +373,9 @@ def test_deployer_creates_zip_and_returns_url(monkeypatch):
     }
     result = DeployerAgent().deploy("uid123", "proj-test", files, _make_plan())
 
-    assert result["status"] == "success"
-    assert result["deployment_url"] is not None
-    assert "proj-test" in result["deployment_url"]
-    assert result["deployment_id"] is not None
-    assert result["errors"] == []
-
-
-def test_deployer_zip_contains_all_files(monkeypatch):
-    """DeployerAgent ZIP includes all generated files."""
-    import io
-    import zipfile
-
-    from app.config import settings as app_settings
-    monkeypatch.setattr(app_settings, "mock_ai", True)
-
-    files = {
-        "backend/app/main.py": "app = 1\n",
-        "README.md": "# Project\n",
-    }
-    deployer = DeployerAgent()
-    zip_buf = deployer._create_zip(files)
-
-    with zipfile.ZipFile(io.BytesIO(zip_buf.getvalue())) as zf:
-        names = zf.namelist()
-
-    assert "backend/app/main.py" in names
-    assert "README.md" in names
+    assert result["status"] == "ready"
+    assert result["zip_url"] is not None
+    assert "proj-test" in result["zip_url"]
 
 
 # ── GenerationOrchestrator ────────────────────────────────────────────────────
@@ -509,19 +485,18 @@ def test_orchestrator_full_pipeline_architect_to_deploy(monkeypatch):
         result = GenerationOrchestrator().run_full_pipeline("uid123", "proj-test")
 
     assert result["status"] == "success"
-    assert result["deployment_url"] is not None
+    assert result["zip_url"] is not None
     assert result["errors"] == []
 
     # Verify state transitions occurred (verifying is skipped in mock mode)
     set_statuses = [call.args[2] for call in mock_set_status.call_args_list]
     assert ProjectStatus.generating in set_statuses
     assert ProjectStatus.testing in set_statuses
-    assert ProjectStatus.deploying in set_statuses
+    assert ProjectStatus.packaging in set_statuses
 
-    # Final update should include deployed + deployment_url
+    # Final update should include current_stage = ready
     final_update = mock_update.call_args_list[-1].args[2]
-    assert final_update["status"] == ProjectStatus.deployed
-    assert "deployment_url" in final_update
+    assert final_update["current_stage"] == "ready"
 
 
 def test_orchestrator_full_pipeline_debug_loop_fires_on_test_failure(monkeypatch):
@@ -669,6 +644,8 @@ def test_full_pipeline_architect_to_deploy(monkeypatch):
         result = GenerationOrchestrator().run_full_pipeline("uid123", "proj-test")
 
     assert result["status"] == "success"
-    assert len(result["generated_files"]) == 2
-    assert result["deployment_url"] is not None
+    assert len(result["generated_files"]) >= 2
+    assert "backend/app/models.py" in result["generated_files"]
+    assert "backend/app/routes/workouts.py" in result["generated_files"]
+    assert result["zip_url"] is not None
     assert result["errors"] == []

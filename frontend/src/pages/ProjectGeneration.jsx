@@ -5,19 +5,15 @@ import {
   CheckCircle2,
   AlertCircle,
   Download,
-  Copy,
-  ExternalLink,
-  Zap,
   Code2,
   FlaskConical,
   Shield,
-  Rocket,
+  Package,
   Loader2,
 } from 'lucide-react'
-import { toast } from 'sonner'
 
 import Logo from '../components/Logo'
-import { getGenerationStatus, downloadGeneratedCode } from '../api/generation'
+import { getGenerationStatus } from '../api/generation'
 
 // Ordered pipeline stages — each maps to one or more project statuses
 const STAGES = [
@@ -43,11 +39,11 @@ const STAGES = [
     statuses: ['verifying', 'verified'],
   },
   {
-    id: 'deploy',
-    label: 'Deploy',
-    description: 'Going live',
-    icon: Rocket,
-    statuses: ['deploying', 'deployed'],
+    id: 'package',
+    label: 'Package',
+    description: 'Creating ZIP',
+    icon: Package,
+    statuses: ['packaging', 'ready', 'ready_with_warnings'],
   },
 ]
 
@@ -60,12 +56,15 @@ const STATUS_TO_STAGE = {
   tested: 1,
   verifying: 2,
   verified: 2,
-  deploying: 3,
-  deployed: 3,
+  packaging: 3,
+  ready: 3,
+  ready_with_warnings: 3,
 }
 
+const DONE_STATUSES = new Set(['ready', 'ready_with_warnings'])
+
 function getStageState(stageIdx, currentStatus) {
-  if (currentStatus === 'deployed') return 'completed'
+  if (DONE_STATUSES.has(currentStatus)) return 'completed'
   if (currentStatus === 'failed') return 'failed'
 
   const currentStageIdx = STATUS_TO_STAGE[currentStatus] ?? -1
@@ -84,7 +83,7 @@ export default function ProjectGeneration() {
     // React Query v5: refetchInterval receives the query object
     refetchInterval: (query) => {
       const s = query.state.data?.status
-      if (s === 'deployed' || s === 'failed') return false
+      if (s === 'ready' || s === 'ready_with_warnings' || s === 'failed') return false
       return 2000
     },
   })
@@ -112,9 +111,9 @@ export default function ProjectGeneration() {
   }
 
   const currentStatus = status?.status ?? 'generating'
-  const isDeployed = currentStatus === 'deployed'
+  const isDone = currentStatus === 'ready' || currentStatus === 'ready_with_warnings'
   const isFailed = currentStatus === 'failed'
-  const isInProgress = !isDeployed && !isFailed
+  const isInProgress = !isDone && !isFailed
 
   return (
     <div className="min-h-screen bg-slate-50">
@@ -132,10 +131,10 @@ export default function ProjectGeneration() {
         {/* Page title */}
         <div className="text-center">
           <h1 className="text-2xl font-semibold text-slate-900 mb-1">
-            {isDeployed ? 'Your App is Live!' : isFailed ? 'Generation Failed' : 'Building Your App'}
+            {isDone ? 'Your App is Ready!' : isFailed ? 'Generation Failed' : 'Building Your App'}
           </h1>
           <p className="text-sm text-slate-500">
-            {isDeployed && 'Everything deployed successfully.'}
+            {isDone && 'Your application has been generated and packaged.'}
             {isFailed && 'Something went wrong. See the error below.'}
             {isInProgress && 'Hang tight — Claude is writing your complete application…'}
           </p>
@@ -256,10 +255,11 @@ export default function ProjectGeneration() {
         )}
 
         {/* ── Success screen ── */}
-        {isDeployed && (
+        {isDone && (
           <SuccessScreen
-            deploymentUrl={status.deployment_url}
-            projectId={projectId}
+            zipUrl={status.zip_url}
+            hasWarnings={currentStatus === 'ready_with_warnings'}
+            lastError={status.last_error}
           />
         )}
 
@@ -272,89 +272,55 @@ export default function ProjectGeneration() {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function SuccessScreen({ deploymentUrl, projectId }) {
-  const handleCopy = () => {
-    navigator.clipboard.writeText(deploymentUrl).then(() => {
-      toast.success('URL copied to clipboard!')
-    })
-  }
-
+function SuccessScreen({ zipUrl, hasWarnings, lastError }) {
   return (
     <div className="space-y-5">
       {/* Banner */}
-      <div className="rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white p-8 text-center shadow-md">
-        <div className="text-5xl mb-3">🎉</div>
-        <h2 className="text-2xl font-bold mb-1">Your App is Live!</h2>
+      <div
+        className={`rounded-xl text-white p-8 text-center shadow-md ${
+          hasWarnings
+            ? 'bg-gradient-to-r from-amber-500 to-orange-500'
+            : 'bg-gradient-to-r from-emerald-500 to-teal-500'
+        }`}
+      >
+        <div className="text-5xl mb-3">{hasWarnings ? '⚠️' : '🎉'}</div>
+        <h2 className="text-2xl font-bold mb-1">
+          {hasWarnings ? 'App Ready (with warnings)' : 'Your App is Ready!'}
+        </h2>
         <p className="text-sm opacity-90">
-          Your full-stack application was generated and deployed automatically.
+          {hasWarnings
+            ? 'The code was packaged but some tests did not pass — review before deploying.'
+            : 'Your full-stack application has been generated and packaged.'}
         </p>
       </div>
 
-      {/* Deployment URL */}
+      {/* Warning detail */}
+      {hasWarnings && lastError && (
+        <div className="card border-amber-200 bg-amber-50 space-y-1">
+          <p className="text-xs font-semibold text-amber-800">Test warning</p>
+          <p className="text-xs text-amber-700 font-mono break-words">{lastError}</p>
+        </div>
+      )}
+
+      {/* Download */}
       <div className="card space-y-3">
-        <h3 className="text-sm font-semibold text-slate-700">Live URL</h3>
-        <div className="flex items-center gap-2 bg-slate-100 rounded-lg px-3 py-2">
-          <code className="flex-1 text-sm font-mono text-slate-800 truncate">
-            {deploymentUrl || '—'}
-          </code>
-          {deploymentUrl && (
-            <>
-              <button
-                onClick={handleCopy}
-                className="btn-secondary p-1.5"
-                title="Copy URL"
-              >
-                <Copy size={14} />
-              </button>
-              <a
-                href={deploymentUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="btn-secondary p-1.5"
-                title="Open app"
-              >
-                <ExternalLink size={14} />
-              </a>
-            </>
-          )}
-        </div>
-
-        {/* Stack badges */}
-        <div className="flex gap-2 flex-wrap">
-          {['React 18', 'FastAPI', 'PostgreSQL'].map((label) => (
-            <span
-              key={label}
-              className="px-2 py-0.5 rounded text-xs font-semibold bg-primary-50 text-primary-700 border border-primary-100"
-            >
-              {label}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* Action buttons */}
-      <div className="grid grid-cols-2 gap-3">
-        <button
-          className="btn-secondary"
-          onClick={() => downloadGeneratedCode(projectId)}
-        >
-          <Download size={15} className="mr-2" />
-          Download Code
-        </button>
-        {deploymentUrl ? (
+        <h3 className="text-sm font-semibold text-slate-700">Download your code</h3>
+        <p className="text-sm text-slate-500">
+          Your project is packaged as a ZIP archive. The download link is valid for 7 days.
+        </p>
+        {zipUrl ? (
           <a
-            href={deploymentUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="btn-primary flex items-center justify-center"
+            href={zipUrl}
+            download
+            className="btn-primary flex items-center justify-center w-full"
           >
-            <ExternalLink size={15} className="mr-2" />
-            Visit App
+            <Download size={15} className="mr-2" />
+            Download ZIP
           </a>
         ) : (
-          <button className="btn-primary" disabled>
+          <button className="btn-primary w-full" disabled>
             <Loader2 size={15} className="mr-2 animate-spin" />
-            Deploying…
+            Preparing download…
           </button>
         )}
       </div>
@@ -363,8 +329,8 @@ function SuccessScreen({ deploymentUrl, projectId }) {
       <div className="card bg-primary-50 border-primary-100 space-y-2">
         <h3 className="text-sm font-semibold text-primary-800">Next Steps</h3>
         <ul className="space-y-1.5 text-sm text-primary-700">
-          <li>✅ Your app is running live — share the URL with others</li>
-          <li>💾 Download the source code to deploy it yourself</li>
+          <li>📦 Download the ZIP and extract it locally</li>
+          <li>🚀 Deploy to Vercel, Railway, or any cloud host of your choice</li>
           <li>🔄 Start a new project anytime from the Dashboard</li>
         </ul>
       </div>

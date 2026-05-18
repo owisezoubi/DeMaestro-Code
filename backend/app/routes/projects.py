@@ -63,14 +63,14 @@ def _regenerate_with_changes(uid: str, project_id: str, change_request: str) -> 
             raise RuntimeError(f"Verification failed: {verify_result['issues']}")
 
         deploy_result = DeployerAgent().deploy(uid, project_id, updated_files, plan)
-        if deploy_result["status"] != "success":
-            raise RuntimeError(f"Deployment failed: {deploy_result['errors']}")
+        if deploy_result["status"] != "ready":
+            raise RuntimeError(f"Packaging failed: {deploy_result.get('errors', [])}")
 
         modification_round = project.modification_round or 1
         fs.update_project(uid, project_id, {
-            "status": ProjectStatus.deployed,
+            "status": ProjectStatus.ready,
             "generated_files": updated_files,
-            "deployment_url": deploy_result["deployment_url"],
+            "zip_url": deploy_result["zip_url"],
             "modification_round_completed": modification_round,
             "error_message": None,
         })
@@ -79,7 +79,7 @@ def _regenerate_with_changes(uid: str, project_id: str, change_request: str) -> 
     except Exception as exc:
         log.error("regenerate_with_changes.error", project_id=project_id, error=str(exc))
         fs.update_project(uid, project_id, {
-            "status": ProjectStatus.deployment_failed,
+            "status": ProjectStatus.failed,
             "error_message": str(exc),
         })
 
@@ -134,7 +134,7 @@ async def request_changes(
     project = fs.get_project(user.uid, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    if project.status != ProjectStatus.deployed:
+    if project.status not in (ProjectStatus.ready, ProjectStatus.ready_with_warnings):
         raise HTTPException(status_code=400, detail=f"Cannot request changes from status {project.status}")
 
     change_request = request_body.get("change_request")

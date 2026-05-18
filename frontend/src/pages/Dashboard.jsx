@@ -148,7 +148,7 @@ export default function Dashboard() {
                   {p.name}
                 </h3>
                 <p className="text-xs text-slate-500">id: {p.id}</p>
-                {(p.status === 'deployed' || p.status === 'modifying' || p.status === 'regenerating' || p.status === 'deployment_failed') && (
+                {(p.status === 'ready' || p.status === 'ready_with_warnings' || p.status === 'modifying' || p.status === 'regenerating') && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
@@ -196,6 +196,7 @@ function StatusPill({ status }) {
     verifying: 'bg-blue-100 text-blue-800',
     packaging: 'bg-blue-100 text-blue-800',
     ready: 'bg-emerald-100 text-emerald-800',
+    ready_with_warnings: 'bg-yellow-100 text-yellow-800',
     deployed: 'bg-emerald-100 text-emerald-800',
     modifying: 'bg-violet-100 text-violet-800',
     regenerating: 'bg-violet-100 text-violet-800',

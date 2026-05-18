@@ -8,6 +8,7 @@ from app.config import settings
 from app.models.generation_plan import GenerationPlan
 
 _INFRASTRUCTURE_ERROR_PATTERNS = [
+    # Missing tools / filesystem / network
     "No such file or directory:",
     "command not found",
     "FileNotFoundError",
@@ -16,6 +17,21 @@ _INFRASTRUCTURE_ERROR_PATTERNS = [
     "Could not connect to",
     "Connection refused",
     "Timeout",
+    # pip / wheel-build failures (environment, not code)
+    "Failed building wheel for",
+    "Could not build wheels for",
+    "ERROR: Failed building wheel",
+    "error: failed-wheel-build",
+    "error: command '/usr/bin/clang' failed",
+    "error: command 'gcc' failed",
+    "Microsoft Visual C++ 14.0 or greater is required",
+    "Requirement already satisfied:",
+    "ERROR: Could not find a version that satisfies",
+    "ERROR: No matching distribution found for",
+    # npm dependency failures
+    "npm ERR! code",
+    "npm error code",
+    "ERESOLVE unable to resolve dependency tree",
 ]
 
 # Primary: matches flake8/ruff output lines like `./backend/app/auth.py:225:16: W292 ...`

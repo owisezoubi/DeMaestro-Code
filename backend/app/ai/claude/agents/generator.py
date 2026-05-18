@@ -8,6 +8,37 @@ from app.ai.gemini.agents.blueprint import BlueprintResponse
 from app.config import settings
 from app.models.generation_plan import FileToGenerate, GenerationPlan
 
+_SCAFFOLDING_PATHS: frozenset[str] = frozenset({
+    "backend/requirements.txt",
+    "backend/Dockerfile",
+    "backend/app/__init__.py",
+    "backend/app/routes/__init__.py",
+    "frontend/package.json",
+    "frontend/Dockerfile",
+    "frontend/vite.config.js",
+    "frontend/tailwind.config.js",
+    "frontend/postcss.config.js",
+    "frontend/index.html",
+    "frontend/src/main.jsx",
+    "frontend/src/index.css",
+    "frontend/src/lib/utils.js",
+    "frontend/src/components/ui/button.jsx",
+    "frontend/src/components/ui/card.jsx",
+    "frontend/src/components/ui/input.jsx",
+    "frontend/src/components/ui/label.jsx",
+    "frontend/src/components/ui/textarea.jsx",
+    "frontend/src/components/ui/badge.jsx",
+    "frontend/src/components/ui/alert.jsx",
+    "frontend/src/components/ui/avatar.jsx",
+    "frontend/src/components/ui/separator.jsx",
+    "frontend/src/components/ui/scroll-area.jsx",
+    "frontend/src/components/ui/skeleton.jsx",
+    "frontend/src/components/ui/tooltip.jsx",
+    "docker-compose.yml",
+    ".env.example",
+    "SETUP.md",
+})
+
 
 class GeneratorAgent:
     def __init__(self) -> None:
@@ -24,6 +55,10 @@ class GeneratorAgent:
     ) -> str:
         """Generate a single file's content."""
         self.log.info("generate_file.start", path=file_to_gen.path)
+
+        if file_to_gen.path in _SCAFFOLDING_PATHS:
+            self.log.warning("generator.skip_scaffolding", path=file_to_gen.path)
+            return ""
 
         if settings.mock_ai:
             content = self._build_mock_content(file_to_gen)

@@ -26,6 +26,7 @@ class ProjectStatus(str, Enum):
     deployment_failed = "deployment_failed"
     packaging = "packaging"
     ready = "ready"
+    ready_with_warnings = "ready_with_warnings"
     failed = "failed"
 
 
@@ -54,10 +55,13 @@ class ProjectMeta(BaseModel):
     approval_notes: Optional[str] = None
     generated_files: Optional[dict] = None  # { file_path: content }
     generation_plan: Optional[dict] = None  # GenerationPlan as dict
+    zip_url: Optional[str] = None
+    packaged_at: Optional[str] = None
     deployment_url: Optional[str] = None
     deployment_id: Optional[str] = None
     error_message: Optional[str] = None
     last_error: Optional[str] = None  # transient error (e.g. clarification failed); project stays retryable
+    install_error_log: Optional[str] = None  # raw pip/npm output when install fails; kept for debugging
     resolved_topics: list[str] = []
     last_change_request: Optional[str] = None
     modification_round: Optional[int] = None

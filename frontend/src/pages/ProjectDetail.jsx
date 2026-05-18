@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ExternalLink } from 'lucide-react'
+import { ArrowLeft, Download } from 'lucide-react'
 import { toast } from 'sonner'
 
 import Logo from '../components/Logo'
@@ -81,15 +81,14 @@ export default function ProjectDetail() {
             </p>
           </div>
 
-          {project.deployment_url && (
+          {project.zip_url && (
             <a
-              href={project.deployment_url}
-              target="_blank"
-              rel="noopener noreferrer"
+              href={project.zip_url}
+              download
               className="btn-primary"
             >
-              <ExternalLink className="w-4 h-4 mr-2" />
-              Visit App
+              <Download className="w-4 h-4 mr-2" />
+              Download ZIP
             </a>
           )}
         </div>
@@ -108,7 +107,7 @@ export default function ProjectDetail() {
           </div>
         )}
 
-        {project.status === 'deployed' && (
+        {(project.status === 'ready' || project.status === 'ready_with_warnings') && (
           <div className="border-t border-slate-200 pt-8">
             <h2 className="text-lg font-semibold text-slate-900 mb-1">Request Changes</h2>
             <p className="text-sm text-slate-500 mb-4">

@@ -61,8 +61,8 @@ async def get_generation_status(project_id: str, user: CurrentUser) -> dict:
         "total_files": project.total_files or total_files,
         "current_file": project.current_file,
         "current_stage": project.current_stage,
-        "deployment_url": project.deployment_url,
-        "deployment_id": project.deployment_id,
+        "zip_url": project.zip_url,
+        "last_error": project.last_error,
         "error_message": project.error_message,
     }
 

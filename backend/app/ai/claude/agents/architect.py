@@ -76,8 +76,33 @@ Output a JSON GenerationPlan with:
 - Then FastAPI app setup and auth routes
 - Then data routes (CRUD endpoints for each entity)
 - Then React pages (login, dashboard, entity pages, forms)
-- Include .env.example, README, docker-compose.yml for completeness
-- Total files: 15-25 files (realistic for a full-stack app)
+- Total files: 10-20 APPLICATION code files (do not count scaffolding)
+
+## Files you must NOT include in your plan
+
+These scaffolding files are provided by deterministic templates and will overwrite
+anything you generate. Including them wastes tokens and causes generation failures.
+
+- backend/requirements.txt
+- backend/Dockerfile
+- backend/app/__init__.py
+- backend/app/routes/__init__.py
+- frontend/package.json
+- frontend/Dockerfile
+- frontend/vite.config.js
+- frontend/tailwind.config.js
+- frontend/postcss.config.js
+- frontend/index.html
+- frontend/src/main.jsx
+- frontend/src/index.css
+- frontend/src/lib/utils.js
+- frontend/src/components/ui/*.jsx  (button, card, input, label, textarea, badge, alert, avatar, separator, scroll-area, skeleton, tooltip)
+- docker-compose.yml
+- .env.example
+- SETUP.md
+
+Focus your plan on APPLICATION code only: models, schemas, routes, services,
+pages, and app-specific components. Do not generate scaffolding.
 
 Output ONLY valid JSON, no markdown wrapper."""
 
@@ -131,18 +156,6 @@ Output ONLY valid JSON, no markdown wrapper."""
                 description="Main dashboard page showing summary stats.",
                 depends_on=[],
                 template="react_page",
-            ),
-            FileToGenerate(
-                path="docker-compose.yml",
-                description="Docker Compose config for backend, frontend, and PostgreSQL.",
-                depends_on=[],
-                template="none",
-            ),
-            FileToGenerate(
-                path=".env.example",
-                description="Example environment variables for local development.",
-                depends_on=[],
-                template="none",
             ),
         ]
         return GenerationPlan(

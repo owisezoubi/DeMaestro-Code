@@ -181,7 +181,7 @@ def test_post_request_changes_stores_request_and_starts_regeneration():
     project = ProjectMeta(
         id="proj123",
         name="TestApp",
-        status=ProjectStatus.deployed,
+        status=ProjectStatus.ready,
         modification_round=1,
     )
 
@@ -210,7 +210,7 @@ def test_post_request_changes_stores_request_and_starts_regeneration():
 
 
 def test_post_request_changes_missing_request_returns_400():
-    project = ProjectMeta(id="proj123", name="TestApp", status=ProjectStatus.deployed)
+    project = ProjectMeta(id="proj123", name="TestApp", status=ProjectStatus.ready)
 
     with patch("app.services.firestore_service.get_project", return_value=project):
         r = client.post("/projects/proj123/request-changes", json={})
@@ -238,7 +238,7 @@ def test_request_changes_stores_in_firestore():
     project = ProjectMeta(
         id="proj456",
         name="AnotherApp",
-        status=ProjectStatus.deployed,
+        status=ProjectStatus.ready,
         modification_round=None,
     )
 
@@ -296,10 +296,8 @@ def _mock_agents(mock_debug_status="fixed"):
 
     deploy = MagicMock()
     deploy.deploy.return_value = {
-        "status": "success",
-        "deployment_url": "https://updated.example.com",
-        "deployment_id": "dep-new",
-        "errors": [],
+        "status": "ready",
+        "zip_url": "https://storage.example.com/proj123.zip",
     }
 
     return debug, verify, deploy
@@ -321,7 +319,7 @@ def test_regenerate_with_changes_updates_files_and_redeploys():
     # Verify the final update contains the merged files
     final_fields = mock_update.call_args_list[-1][0][2]
     assert final_fields["generated_files"]["src/App.jsx"] == "const App = () => <div>dark</div>;"
-    assert final_fields["deployment_url"] == "https://updated.example.com"
+    assert final_fields["zip_url"] == "https://storage.example.com/proj123.zip"
     # Verify the deploy call received the merged file set
     deploy.deploy.assert_called_once()
     deployed_files = deploy.deploy.call_args[0][2]
@@ -345,7 +343,7 @@ def test_regenerate_with_changes_sets_status_to_deployed_on_success():
     # First call sets regenerating; last call sets deployed
     assert calls[0][0][2] == {"status": ProjectStatus.regenerating}
     final_fields = calls[-1][0][2]
-    assert final_fields["status"] == ProjectStatus.deployed
+    assert final_fields["status"] == ProjectStatus.ready
     assert final_fields["modification_round_completed"] == 2
     assert final_fields["error_message"] is None
 
@@ -364,5 +362,5 @@ def test_regenerate_with_changes_sets_deployment_failed_on_error():
         _regenerate_with_changes("test-uid", "proj123", "Add dark mode")
 
     final_fields = mock_update.call_args_list[-1][0][2]
-    assert final_fields["status"] == ProjectStatus.deployment_failed
+    assert final_fields["status"] == ProjectStatus.failed
     assert "Could not generate changes" in final_fields["error_message"]

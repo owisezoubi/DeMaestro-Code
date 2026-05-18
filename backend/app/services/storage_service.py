@@ -21,19 +21,26 @@ def upload_file(blob_path: str, local_path: Path, content_type: str | None = Non
 
 
 def upload_pdf(uid: str, project_id: str, input_id: str, pdf_bytes: bytes) -> str:
-    """Upload a PDF to users/{uid}/projects/{projectId}/uploads/{inputId}.pdf.
-
-    Returns the storage path.
-    """
+    """Upload a PDF to users/{uid}/projects/{projectId}/uploads/{inputId}.pdf."""
     path = f"users/{uid}/projects/{project_id}/uploads/{input_id}.pdf"
     return upload_bytes(path, pdf_bytes, content_type="application/pdf")
 
 
-def signed_download_url(blob_path: str, expires_in_minutes: int = 15) -> str:
+def upload_zip(uid: str, project_id: str, zip_bytes: bytes) -> str:
+    """Upload a generated-project ZIP to users/{uid}/projects/{projectId}/exports/{projectId}.zip.
+
+    Returns the storage object path.
+    """
+    path = f"users/{uid}/projects/{project_id}/exports/{project_id}.zip"
+    return upload_bytes(path, zip_bytes, content_type="application/zip")
+
+
+def signed_download_url(blob_path: str, expires_in_days: int = 7) -> str:
+    """Return a signed URL valid for expires_in_days days (default 7)."""
     bucket = get_storage_bucket()
     blob = bucket.blob(blob_path)
     return blob.generate_signed_url(
-        expiration=timedelta(minutes=expires_in_minutes),
+        expiration=timedelta(days=expires_in_days),
         method="GET",
         version="v4",
     )

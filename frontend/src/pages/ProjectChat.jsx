@@ -8,7 +8,7 @@ import Logo from '../components/Logo'
 import { getProjectStatus } from '../api/requirements'
 import { triggerStructuring, getClarifications, answerClarification } from '../api/structure'
 
-const TERMINAL = new Set(['ready', 'failed', 'awaiting_approval'])
+const TERMINAL = new Set(['ready', 'ready_with_warnings', 'failed', 'awaiting_approval'])
 
 const STATUS_STYLES = {
   awaiting_input: 'bg-slate-100 text-slate-700',
@@ -48,12 +48,15 @@ export default function ProjectChat() {
   const { data: clarifications = [], isLoading: clarificationsLoading } = useQuery({
     queryKey: ['clarifications', projectId],
     queryFn: () => getClarifications(projectId),
-    refetchInterval: (query) => {
-      if (!query.state.data?.length || status !== 'clarifying') return false
-      return 3000
-    },
+    refetchInterval: () => (status === 'clarifying' ? 3000 : false),
     enabled: status === 'clarifying',
   })
+
+  useEffect(() => {
+    if (status === 'clarifying') {
+      console.log('[Clarifications] received', clarifications?.length, 'items, first id:', clarifications?.[0]?.id)
+    }
+  }, [clarifications, status])
 
   useEffect(() => {
     return () => {
@@ -214,9 +217,14 @@ function ClarificationCard({ clarifications, projectId, qc }) {
   const answerMut = useMutation({
     mutationFn: ({ ambiguityId, answer }) =>
       answerClarification(projectId, ambiguityId, answer),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['clarifications', projectId] })
-      qc.invalidateQueries({ queryKey: ['project-status', projectId] })
+    onSuccess: async () => {
+      await Promise.all([
+        qc.refetchQueries({ queryKey: ['clarifications', projectId], type: 'all' }),
+        qc.refetchQueries({ queryKey: ['project-status', projectId], type: 'all' }),
+      ])
+      setTimeout(() => {
+        qc.refetchQueries({ queryKey: ['clarifications', projectId], type: 'all' })
+      }, 300)
     },
     onSettled: () => {
       setFreeText('')

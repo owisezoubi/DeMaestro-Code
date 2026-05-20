@@ -1,5 +1,7 @@
 """DebuggerAgent — uses Claude to fix test failures one file at a time."""
+import json
 import re
+from typing import Optional
 
 import structlog
 from anthropic import Anthropic
@@ -37,9 +39,18 @@ _INFRASTRUCTURE_ERROR_PATTERNS = [
 # Primary: matches flake8/ruff output lines like `./backend/app/auth.py:225:16: W292 ...`
 _LINT_LINE_RE = re.compile(r"^\s*\./?(?P<path>[\w./\\-]+\.[a-z]+):\d+:\d+:")
 
+# Secondary: matches Python traceback lines `  File "/tmp/.../backend/app/models.py", line 42`
+_TRACEBACK_FILE_RE = re.compile(r'File\s+"(?P<path>[^"]+\.py)",\s+line\s+\d+')
+
 # Fallback: matches `path/to/file.py:` references regardless of what follows the colon.
 # Covers both ast.parse-style "file.py: SyntaxError" and "file.py:42" formats.
 _FILE_REF_RE = re.compile(r"(?P<path>[\w./\\-]+\.(?:py|jsx?|tsx?)):")
+
+# Paths that belong to installed libraries, not generated user code.
+_LIBRARY_SKIP_PREFIXES = (".testenv/", "site-packages/", ".venv/", "/venv/", "<frozen", "lib/python")
+
+# Patterns that indicate a real (non-infrastructure) code error worth attempting a blind fix.
+_SUBSTANTIVE_ERROR_PATTERNS = ["Traceback", "Error:", "Exception:", "sqlalchemy."]
 
 
 def _is_infrastructure_error(msg: str) -> bool:
@@ -99,9 +110,25 @@ class DebuggerAgent:
             files_to_fix = self._extract_files_from_error(full_error_text)
 
             if not files_to_fix:
+                # Attempt a blind fix when no file paths are extractable but the error is real code.
+                if any(p in full_error_text for p in _SUBSTANTIVE_ERROR_PATTERNS):
+                    self.log.info("debug.attempting_blind_fix", error_preview=full_error_text[:100])
+                    blind = self._blind_fix_attempt(full_error_text, generated_files)
+                    if blind and blind.get("file_path") and blind["file_path"] in generated_files:
+                        fp = blind["file_path"]
+                        new_counts = dict(attempt_count)
+                        new_counts[fp] = new_counts.get(fp, 0) + 1
+                        self.log.info("debug.blind_fix.applied", file=fp)
+                        return {
+                            "status": "fixed",
+                            "fixed_files": {fp: blind["fixed_content"]},
+                            "attempt_counts": new_counts,
+                            "errors": [],
+                        }
                 self.log.warning("debug.cannot_identify_file", error=full_error_text[:200])
                 return {
-                    "status": "error",
+                    "status": "skipped",
+                    "reason": "Could not auto-fix; surfaced to user",
                     "fixed_files": {},
                     "attempt_counts": attempt_count,
                     "errors": [f"Could not identify any file to fix from: {full_error_text[:120]}"],
@@ -175,26 +202,77 @@ class DebuggerAgent:
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _extract_files_from_error(self, error_message: str) -> list[str]:
-        """Extract unique file paths from a multi-line lint/error output.
+        """Extract unique generated-project file paths from lint output OR Python traceback.
 
-        Primary: flake8/ruff format `./path/to/file.py:line:col: CODE msg`
-        Fallback: simpler `path/to/file.py:line` format from ast.parse errors.
+        Filters out library paths (.testenv/, site-packages/, .venv/) that aren't user code.
+        Normalises absolute tmpdir paths to relative project paths (backend/… or frontend/…).
         """
         files: set[str] = set()
         for line in error_message.splitlines():
-            m = _LINT_LINE_RE.match(line)
+            m = _LINT_LINE_RE.match(line) or _TRACEBACK_FILE_RE.search(line)
             if not m:
                 m = _FILE_REF_RE.search(line)
-            if m:
-                path = m.group("path").lstrip("./")
-                if path:
-                    files.add(path)
+            if not m:
+                continue
+            path = m.group("path")
+            # Skip library / interpreter internals
+            if any(skip in path for skip in _LIBRARY_SKIP_PREFIXES):
+                continue
+            # Normalise absolute tmpdir paths to relative project paths.
+            # e.g. /private/var/.../demaestro_test_xxx/backend/app/models.py → backend/app/models.py
+            for prefix in ("backend/", "frontend/"):
+                idx = path.find(prefix)
+                if idx >= 0:
+                    path = path[idx:]
+                    break
+            else:
+                path = path.lstrip("./")
+            if path:
+                files.add(path)
         return sorted(files)
 
     def _fix_mock(self, file_path: str, original_content: str, error_msg: str) -> str:
         """Mock fix: strip the broken line and prepend a correction comment."""
         short_err = error_msg[:80].replace("\n", " ")
         return f"# FIXED: {short_err}\n{original_content}"
+
+    def _blind_fix_attempt(
+        self, error: str, all_files: dict[str, str]
+    ) -> Optional[dict]:
+        """When file extraction fails but the error is real, ask Claude to identify and fix.
+
+        Returns {"file_path": "...", "fixed_content": "..."} or None if Claude cannot help.
+        Capped at one call to avoid runaway; mock mode returns None immediately.
+        """
+        if settings.mock_ai:
+            return None
+
+        prompt = (
+            "Below is a build error from a generated Python+FastAPI project. "
+            "Identify which file most likely contains the bug, and return a fix.\n\n"
+            f"Error:\n{error[:3000]}\n\n"
+            f"Available files:\n{json.dumps(list(all_files.keys()), indent=2)}\n\n"
+            'Respond with JSON: {"file_path": "...", "fixed_content": "..."} '
+            'or {"file_path": null} if you cannot determine the cause.'
+        )
+        try:
+            client = Anthropic(api_key=settings.anthropic_api_key)
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=8000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.content[0].text.strip()
+            text = re.sub(r"^```\w*\n", "", text)
+            text = re.sub(r"\n```$", "", text)
+            result = json.loads(text)
+            if result.get("file_path"):
+                self.log.info("_blind_fix_attempt.success", file=result["file_path"])
+                return result
+            return None
+        except Exception as exc:
+            self.log.warning("_blind_fix_attempt.failed", error=str(exc))
+            return None
 
     def _fix_with_claude(
         self,

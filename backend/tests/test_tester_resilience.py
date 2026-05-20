@@ -316,3 +316,113 @@ def test_install_falls_back_to_system_pip_when_venv_creation_fails(tmp_path):
 
     assert venv_python is None, "Fallback path must not set venv_python"
     assert status == "passed"
+
+
+# ── boot stderr exception detection ──────────────────────────────────────────
+
+
+def test_boot_fails_when_stderr_has_sqlalchemy_exception(tmp_path):
+    """Boot is failed when stderr contains a SQLAlchemy exception even if the process is still running."""
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "requirements.txt").write_text("fastapi\n")
+
+    proc_mock = MagicMock()
+    proc_mock.wait.side_effect = subprocess.TimeoutExpired(cmd="uvicorn", timeout=5)
+    proc_mock.communicate.return_value = (
+        "",
+        "sqlalchemy.exc.ArgumentError: Mapper could not assemble any primary key columns\n",
+    )
+
+    with patch("subprocess.Popen", return_value=proc_mock):
+        status, output = TesterAgent()._run_boot(tmp_path, "python-sqlite")
+
+    assert status == "failed", "SQLAlchemy exception in stderr must fail boot"
+    assert "sqlalchemy" in output.lower() or "exception" in output.lower()
+
+
+def test_boot_fails_when_stderr_has_traceback(tmp_path):
+    """Boot is failed when stderr contains a Python traceback."""
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "requirements.txt").write_text("fastapi\n")
+
+    proc_mock = MagicMock()
+    proc_mock.wait.side_effect = subprocess.TimeoutExpired(cmd="uvicorn", timeout=5)
+    proc_mock.communicate.return_value = (
+        "",
+        "Traceback (most recent call last):\n  File 'main.py', line 1\nImportError: No module named 'foo'\n",
+    )
+
+    with patch("subprocess.Popen", return_value=proc_mock):
+        status, _ = TesterAgent()._run_boot(tmp_path, "python-sqlite")
+
+    assert status == "failed", "Traceback in stderr must fail boot"
+
+
+def test_boot_passes_with_clean_stderr(tmp_path):
+    """Boot passes when stderr contains only gRPC infrastructure noise (not exception patterns)."""
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir()
+    (backend_dir / "requirements.txt").write_text("fastapi\n")
+
+    proc_mock = MagicMock()
+    proc_mock.wait.side_effect = subprocess.TimeoutExpired(cmd="uvicorn", timeout=5)
+    proc_mock.communicate.return_value = (
+        "INFO: Started server process [1234]\nINFO: Uvicorn running on http://0.0.0.0:8001\n",
+        "FD from fork parent\nINFO: Application startup complete.\n",
+    )
+
+    with patch("subprocess.Popen", return_value=proc_mock):
+        status, _ = TesterAgent()._run_boot(tmp_path, "python-sqlite")
+
+    assert status == "passed", "gRPC/infra noise in stderr must not fail boot"
+
+
+# ── debugger traceback file extraction ───────────────────────────────────────
+
+
+def test_debugger_extracts_files_from_python_traceback():
+    """_extract_files_from_error parses 'File "...", line N' traceback lines."""
+    traceback = (
+        'Traceback (most recent call last):\n'
+        '  File "/private/var/folders/xx/demaestro_test_abc123/backend/app/models.py", line 42, in <module>\n'
+        '    mapper_registry.configure()\n'
+        'sqlalchemy.exc.ArgumentError: Mapper could not assemble any primary key columns\n'
+    )
+    files = DebuggerAgent()._extract_files_from_error(traceback)
+    assert "backend/app/models.py" in files
+
+
+def test_debugger_skips_library_paths_in_traceback():
+    """_extract_files_from_error excludes .testenv/site-packages paths — those aren't user code."""
+    traceback = (
+        'Traceback (most recent call last):\n'
+        '  File "/tmp/demaestro_test_xxx/.testenv/lib/python3.13/site-packages/sqlalchemy/orm/mapper.py", line 100\n'
+        '    raise ArgumentError(...)\n'
+        'sqlalchemy.exc.ArgumentError: bad mapper\n'
+    )
+    files = DebuggerAgent()._extract_files_from_error(traceback)
+    assert files == [], f"Library paths must be excluded, got: {files}"
+
+
+def test_debugger_blind_fix_fallback_when_no_file_extractable(monkeypatch):
+    """When no file path is extractable but the error is substantive, _blind_fix_attempt is called."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", False)
+
+    test_results = {
+        "status": "failed",
+        "errors": ["Error: Mapper could not assemble any primary key columns for table 'items'"],
+        "logs": {},
+        "passed_checks": {"boot": "failed"},
+    }
+
+    with patch.object(DebuggerAgent, "_blind_fix_attempt", return_value=None) as mock_blind:
+        result = DebuggerAgent().debug_and_fix(
+            test_results, {"backend/app/main.py": "x = 1\n"}, _make_plan()
+        )
+
+    mock_blind.assert_called_once()
+    assert result["status"] == "skipped"
+    assert "Could not auto-fix" in result.get("reason", "")

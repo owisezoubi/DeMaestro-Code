@@ -360,6 +360,54 @@ def test_verifier_flags_missing_db_models():
     assert len(db_issues) >= 1
 
 
+def test_verifier_skips_empty_init_files():
+    """Empty __init__.py files in routes/ must not trigger a missing-FastAPI-import issue."""
+    files = {
+        "backend/app/__init__.py": "",
+        "backend/app/routes/__init__.py": "",
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\n@router.post('/api/workouts')\ndef h(): pass\n"
+        ),
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+    }
+    result = VerifierAgent().verify(files, _make_plan(), _make_blueprint())
+    import_issues = [i for i in result["issues"] if "FastAPI" in i and "__init__" in i]
+    assert import_issues == [], f"__init__.py must not trigger FastAPI import check: {import_issues}"
+
+
+def test_verifier_skips_non_route_files():
+    """Utility modules inside routes/ that have no route patterns must not require FastAPI import."""
+    files = {
+        "backend/app/routes/utils.py": (
+            "def format_response(data):\n    return {'data': data, 'ok': True}\n" * 3
+        ),
+        "backend/app/routes/workouts.py": (
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+            "@router.get('/api/workouts')\n@router.post('/api/workouts')\ndef h(): pass\n"
+        ),
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+    }
+    result = VerifierAgent().verify(files, _make_plan(), _make_blueprint())
+    import_issues = [i for i in result["issues"] if "FastAPI" in i and "utils" in i]
+    assert import_issues == [], f"Non-route utility file must not require FastAPI import: {import_issues}"
+
+
+def test_verifier_flags_route_file_missing_fastapi_import():
+    """A route file that uses @router. decorators but has no FastAPI import must be flagged."""
+    files = {
+        "backend/app/routes/notes.py": (
+            "router = APIRouter()\n"
+            "@router.get('/notes')\ndef list_notes(): return []\n"
+            "@router.post('/notes')\ndef create_note(): return {}\n"
+        ),
+        "backend/app/models.py": "class Workouts:\n    pass\n",
+    }
+    result = VerifierAgent().verify(files, _make_plan(), _make_blueprint())
+    import_issues = [i for i in result["issues"] if "FastAPI" in i]
+    assert len(import_issues) >= 1, "Route file using APIRouter without import must be flagged"
+
+
 # ── DeployerAgent ─────────────────────────────────────────────────────────────
 
 def test_deployer_mock_mode_returns_zip_url(monkeypatch):

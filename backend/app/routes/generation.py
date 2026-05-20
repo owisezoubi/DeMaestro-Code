@@ -64,6 +64,7 @@ async def get_generation_status(project_id: str, user: CurrentUser) -> dict:
         "zip_url": project.zip_url,
         "last_error": project.last_error,
         "error_message": project.error_message,
+        "test_error_log": project.test_error_log,
     }
 
 

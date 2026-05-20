@@ -246,3 +246,91 @@ def test_orchestrator_install_failure_results_in_ready_with_warnings_not_failed(
     assert ProjectStatus.failed not in status_updates, (
         "Pipeline must NOT set failed for infrastructure errors"
     )
+
+
+def test_orchestrator_test_failure_results_in_ready_with_warnings_with_zip(monkeypatch):
+    """When tests fail and debug cannot fix, pipeline still packages a ZIP and sets ready_with_warnings."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    sr = _make_sr()
+    blueprint = _make_blueprint()
+    project = _make_project(blueprint)
+    plan = _make_plan()
+
+    failing_test = {
+        "status": "failed",
+        "errors": ["boot: Traceback (most recent call last): ..."],
+        "passed_checks": {"install": "passed", "lint": "passed", "typecheck": "skipped", "boot": "failed"},
+        "logs": {"boot": "Traceback (most recent call last): ..."},
+    }
+    # Debugger returns "error" — could not identify the file to fix.
+    unfixable = {
+        "status": "error",
+        "fixed_files": {},
+        "attempt_counts": {},
+        "errors": ["Could not identify any file to fix"],
+    }
+
+    firestore_updates: list[dict] = []
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
+        patch("app.services.firestore_service.update_project", side_effect=lambda u, p, d: firestore_updates.append(d)),
+        patch("app.services.firestore_service.set_project_status"),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=plan),
+        patch("app.services.template_service.load_stack_templates", return_value=_FAKE_TEMPLATES),
+        patch("app.ai.claude.agents.generator.GeneratorAgent.generate_file", return_value="# ok\n"),
+        patch("app.ai.claude.agents.tester.TesterAgent.run_tests", return_value=failing_test),
+        patch("app.ai.claude.agents.debugger.DebuggerAgent.debug_and_fix", return_value=unfixable),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+        result = GenerationOrchestrator().run_full_pipeline("uid1", "proj-unfixable")
+
+    # Pipeline must succeed and return a ZIP despite test failure
+    assert result["status"] == "success", f"Expected success, got {result['status']}: {result['errors']}"
+    assert result["zip_url"] is not None, "ZIP must be packaged even when tests fail"
+    assert len(result["errors"]) > 0, "Warning must be surfaced to caller"
+
+    status_updates = [d["status"] for d in firestore_updates if "status" in d]
+    assert ProjectStatus.ready_with_warnings in status_updates, (
+        f"Expected ready_with_warnings, got: {status_updates}"
+    )
+    assert ProjectStatus.failed not in status_updates, (
+        "Test/debug failures must not mark the project as failed"
+    )
+
+
+def test_orchestrator_only_fails_on_catastrophic_errors(monkeypatch):
+    """Generation step raising an exception is catastrophic — pipeline sets failed status."""
+    from app.config import settings as app_settings
+    monkeypatch.setattr(app_settings, "mock_ai", True)
+
+    sr = _make_sr()
+    blueprint = _make_blueprint()
+    project = _make_project(blueprint)
+    plan = _make_plan()
+
+    firestore_updates: list[dict] = []
+
+    with (
+        patch("app.services.firestore_service.get_project", return_value=project),
+        patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
+        patch("app.services.firestore_service.update_project", side_effect=lambda u, p, d: firestore_updates.append(d)),
+        patch("app.services.firestore_service.set_project_status"),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=plan),
+        patch("app.services.template_service.load_stack_templates", return_value=_FAKE_TEMPLATES),
+        patch("app.ai.claude.agents.generator.GeneratorAgent.generate_file",
+              side_effect=RuntimeError("LLM API unavailable")),
+    ):
+        from app.pipeline.generation_orchestrator import GenerationOrchestrator
+        result = GenerationOrchestrator().run_full_pipeline("uid1", "proj-crash")
+
+    assert result["status"] == "error", "Generation crash must result in error status"
+    assert result["zip_url"] is None, "No ZIP should be delivered after a catastrophic crash"
+
+    status_updates = [d["status"] for d in firestore_updates if "status" in d]
+    assert ProjectStatus.failed in status_updates, (
+        "Catastrophic generation failure must mark the project as failed"
+    )

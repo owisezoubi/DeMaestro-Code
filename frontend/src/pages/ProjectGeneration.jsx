@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -260,6 +261,7 @@ export default function ProjectGeneration() {
             zipUrl={status.zip_url}
             hasWarnings={currentStatus === 'ready_with_warnings'}
             lastError={status.last_error}
+            testErrorLog={status.test_error_log}
           />
         )}
 
@@ -272,7 +274,11 @@ export default function ProjectGeneration() {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function SuccessScreen({ zipUrl, hasWarnings, lastError }) {
+function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog }) {
+  const [showErrorLog, setShowErrorLog] = useState(false)
+  const errorLogPreview = testErrorLog ? testErrorLog.slice(0, 500) : null
+  const errorLogTruncated = testErrorLog && testErrorLog.length > 500
+
   return (
     <div className="space-y-5">
       {/* Banner */}
@@ -296,9 +302,25 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError }) {
 
       {/* Warning detail */}
       {hasWarnings && lastError && (
-        <div className="card border-amber-200 bg-amber-50 space-y-1">
+        <div className="card border-amber-200 bg-amber-50 space-y-2">
           <p className="text-xs font-semibold text-amber-800">Test warning</p>
-          <p className="text-xs text-amber-700 font-mono break-words">{lastError}</p>
+          <p className="text-xs text-amber-700 break-words">{lastError}</p>
+          {errorLogPreview && (
+            <div className="mt-1 space-y-1">
+              <pre className="text-xs text-amber-700 font-mono bg-amber-100 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                {showErrorLog ? testErrorLog : errorLogPreview}
+                {!showErrorLog && errorLogTruncated && '…'}
+              </pre>
+              {errorLogTruncated && (
+                <button
+                  onClick={() => setShowErrorLog((v) => !v)}
+                  className="text-xs text-amber-600 underline"
+                >
+                  {showErrorLog ? 'Show less' : 'Show more'}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 

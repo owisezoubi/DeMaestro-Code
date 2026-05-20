@@ -5,6 +5,16 @@ from app.ai.gemini.agents.blueprint import BlueprintResponse
 from app.models.generation_plan import GenerationPlan
 
 
+def _file_needs_fastapi_import(file_path: str, content: str) -> bool:
+    """Whether a Python file in routes/ should be required to import from fastapi."""
+    if len(content.strip()) < 50:
+        return False
+    if file_path.endswith("__init__.py"):
+        return False
+    route_patterns = ["@router.", "@app.", "APIRouter", "app = FastAPI("]
+    return any(p in content for p in route_patterns)
+
+
 class VerifierAgent:
     """Verify generated code against the blueprint: routes, imports, DB schema."""
 
@@ -68,8 +78,9 @@ class VerifierAgent:
 
         for file_path, content in files.items():
             if "python" in stack and file_path.endswith(".py") and "routes" in file_path:
-                if "from fastapi import" not in content and "import fastapi" not in content.lower():
-                    issues.append(f"{file_path}: missing FastAPI import")
+                if _file_needs_fastapi_import(file_path, content):
+                    if "from fastapi import" not in content and "import fastapi" not in content.lower():
+                        issues.append(f"{file_path}: missing FastAPI import")
 
             elif "node" in stack and (
                 file_path.endswith(".jsx") or file_path.endswith(".tsx")

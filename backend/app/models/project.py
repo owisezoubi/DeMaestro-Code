@@ -62,6 +62,7 @@ class ProjectMeta(BaseModel):
     error_message: Optional[str] = None
     last_error: Optional[str] = None  # transient error (e.g. clarification failed); project stays retryable
     install_error_log: Optional[str] = None  # raw pip/npm output when install fails; kept for debugging
+    test_error_log: Optional[str] = None  # raw test/boot errors (capped 5000 chars) for user inspection
     resolved_topics: list[str] = []
     last_change_request: Optional[str] = None
     modification_round: Optional[int] = None

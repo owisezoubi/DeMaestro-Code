@@ -14,6 +14,23 @@ from app.models.generation_plan import GenerationPlan
 
 log = structlog.get_logger("TesterAgent")
 
+_BOOT_FAILURE_PATTERNS = [
+    "Traceback (most recent call last):",
+    "Error:",
+    "Exception:",
+    "sqlalchemy.exc.",
+    "ImportError:",
+    "ModuleNotFoundError:",
+    "SyntaxError:",
+    "AttributeError:",
+    "TypeError:",
+    "NameError:",
+]
+
+
+def _stderr_has_exception(stderr: str) -> bool:
+    return any(p in stderr for p in _BOOT_FAILURE_PATTERNS)
+
 # Statuses: "passed", "failed", "skipped"
 # Skipped means the tool was absent or a manifest was missing; never enters the debug loop.
 
@@ -385,13 +402,17 @@ class TesterAgent:
                 except Exception:
                     pass
             except subprocess.TimeoutExpired:
-                status = "passed"
                 proc.terminate()
                 try:
                     out, err = proc.communicate(timeout=2)
                 except Exception:
                     pass
-                output = "booted ok"
+                if _stderr_has_exception(err):
+                    status = "failed"
+                    output = f"boot exception in stderr: {err[:500]}"
+                else:
+                    status = "passed"
+                    output = "booted ok"
             log.info(
                 "test_boot",
                 status=status,

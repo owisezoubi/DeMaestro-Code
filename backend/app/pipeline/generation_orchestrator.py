@@ -179,6 +179,7 @@ class GenerationOrchestrator:
             best_effort = False
             infra_warning = False
             warning_msg = ""
+            test_results: dict = {}
 
             for cycle in range(_MAX_TEST_CYCLES):
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.testing)
@@ -239,24 +240,51 @@ class GenerationOrchestrator:
                     generated_files.update(debug_result["fixed_files"])
                     attempt_count = debug_result["attempt_counts"]
                 elif debug_result["status"] == "skipped":
-                    log.info("pipeline.debug.skipped_infra_errors", project_id=project_id, cycle=cycle + 1)
-                    infra_warning = True
-                    warning_msg = (
-                        "Dependency installation failed in the test environment. "
-                        "Download the ZIP and try installing dependencies on your own machine."
-                    )
+                    reason = debug_result.get("reason", "")
+                    if "infrastructure" in reason.lower():
+                        log.info("pipeline.debug.skipped_infra_errors", project_id=project_id, cycle=cycle + 1)
+                        infra_warning = True
+                        warning_msg = (
+                            "Dependency installation failed in the test environment. "
+                            "Download the ZIP and try installing dependencies on your own machine."
+                        )
+                    else:
+                        log.warning("pipeline.debug.cannot_auto_fix", project_id=project_id, cycle=cycle + 1, reason=reason)
+                        best_effort = True
+                        _test_summary = ", ".join(
+                            f"{c}: {s}" for c, s in test_results.get("passed_checks", {}).items()
+                        )
+                        warning_msg = (
+                            "The generated code did not pass automated tests in our environment"
+                            + (f" ({_test_summary})" if _test_summary else "")
+                            + ". You can still download the ZIP — the code may "
+                            "need small manual fixes to run locally. Check the README for setup."
+                        )
                     test_passed = True
                     break
                 else:
-                    raise RuntimeError(f"Debug failed after {cycle + 1} cycles: {debug_result['errors']}")
+                    # Debug could not identify or fix the file — package best-effort anyway.
+                    log.warning(
+                        "pipeline.debug.cannot_fix",
+                        project_id=project_id,
+                        cycle=cycle + 1,
+                        errors=debug_result.get("errors"),
+                    )
+                    break  # test_passed stays False → best_effort block below
 
-            # Best-effort: if tests didn't pass, still package and deliver the code.
+            # Best-effort: always package the ZIP even if tests never passed.
             if not test_passed:
                 best_effort = True
-                warning_msg = (
-                    f"Tests did not pass after {_MAX_TEST_CYCLES} debug cycles — "
-                    "code may have runtime issues."
+                _test_summary = ", ".join(
+                    f"{c}: {s}" for c, s in test_results.get("passed_checks", {}).items()
                 )
+                warning_msg = (
+                    "The generated code did not pass automated tests in our environment"
+                    + (f" ({_test_summary})" if _test_summary else "")
+                    + ". You can still download the ZIP — the code may "
+                    "need small manual fixes to run locally. Check the README for setup."
+                )
+                _test_error_log = ("\n".join(test_results.get("errors", [])))[:5000] or None
                 log.warning(
                     "pipeline.tests_failed_packaging_anyway",
                     project_id=project_id,
@@ -265,6 +293,7 @@ class GenerationOrchestrator:
                 firestore_service.update_project(uid, project_id, {
                     "generated_files": generated_files,
                     "last_error": warning_msg,
+                    "test_error_log": _test_error_log,
                 })
             else:
                 firestore_service.update_project(uid, project_id, {

@@ -5,6 +5,7 @@ import { LogOut, Plus, FolderOpen, Trash2, ExternalLink } from 'lucide-react'
 import { toast } from 'sonner'
 
 import Logo from '../components/Logo'
+import ThemeToggle from '../components/ThemeToggle'
 import { useAuth } from '../context/AuthContext'
 import { listProjects, ensureUserProfile, deleteProject } from '../api/projects'
 
@@ -47,15 +48,16 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
       {/* Header */}
-      <header className="border-b border-slate-200 bg-white">
+      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
           <Logo />
           <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-600 hidden sm:inline">
+            <span className="text-sm text-slate-600 dark:text-slate-400 hidden sm:inline">
               {user?.email}
             </span>
+            <ThemeToggle />
             <button
               onClick={onLogout}
               className="btn-secondary"
@@ -75,11 +77,11 @@ export default function Dashboard() {
           onClick={() => setDeleteConfirm(null)}
         >
           <div
-            className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4"
+            className="bg-white dark:bg-slate-800 rounded-xl shadow-xl p-6 max-w-sm w-full mx-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">Delete project?</h2>
-            <p className="text-sm text-slate-600 mb-6">
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-2">Delete project?</h2>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mb-6">
               Are you sure you want to delete <span className="font-medium">"{deleteConfirm.name}"</span>?
               This cannot be undone. All requirements, notes, and generated files will be permanently deleted.
             </p>
@@ -104,7 +106,7 @@ export default function Dashboard() {
       {/* Main */}
       <main className="max-w-5xl mx-auto px-4 py-10">
         <div className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-semibold text-slate-900">
+          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
             Your projects
           </h1>
           <button
@@ -117,7 +119,7 @@ export default function Dashboard() {
         </div>
 
         {isLoading ? (
-          <p className="text-slate-500">Loading projects…</p>
+          <p className="text-slate-500 dark:text-slate-400">Loading projects…</p>
         ) : !projects || projects.length === 0 ? (
           <EmptyState onCreate={onCreate} />
         ) : (
@@ -144,10 +146,10 @@ export default function Dashboard() {
                     </button>
                   </div>
                 </div>
-                <h3 className="font-medium text-slate-900 mb-1 truncate">
+                <h3 className="font-medium text-slate-900 dark:text-slate-100 mb-1 truncate">
                   {p.name}
                 </h3>
-                <p className="text-xs text-slate-500">id: {p.id}</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">id: {p.id}</p>
                 {(p.status === 'ready' || p.status === 'ready_with_warnings' || p.status === 'modifying' || p.status === 'regenerating') && (
                   <button
                     onClick={(e) => {
@@ -173,8 +175,8 @@ function EmptyState({ onCreate }) {
   return (
     <div className="card flex flex-col items-center justify-center py-16 text-center">
       <FolderOpen className="w-10 h-10 text-primary-400 mb-3" />
-      <h3 className="font-medium text-slate-900 mb-1">No projects yet</h3>
-      <p className="text-sm text-slate-500 mb-4">
+      <h3 className="font-medium text-slate-900 dark:text-slate-100 mb-1">No projects yet</h3>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
         Start by creating a project, then describe what you want to build.
       </p>
       <button onClick={onCreate} className="btn-primary">

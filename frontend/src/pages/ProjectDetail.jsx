@@ -5,6 +5,7 @@ import { ArrowLeft, Download } from 'lucide-react'
 import { toast } from 'sonner'
 
 import Logo from '../components/Logo'
+import ThemeToggle from '../components/ThemeToggle'
 import { getProject, requestChanges } from '../api/projects'
 
 export default function ProjectDetail() {
@@ -25,7 +26,7 @@ export default function ProjectDetail() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-slate-500">
+      <div className="min-h-screen flex items-center justify-center text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900">
         Loading…
       </div>
     )
@@ -33,7 +34,7 @@ export default function ProjectDetail() {
 
   if (!project) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-slate-500">
+      <div className="min-h-screen flex items-center justify-center text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900">
         Project not found.
       </div>
     )
@@ -58,25 +59,28 @@ export default function ProjectDetail() {
   }
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-slate-200 bg-white">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
         <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
           <Logo />
-          <button
-            onClick={() => navigate('/dashboard')}
-            className="btn-secondary"
-          >
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Dashboard
-          </button>
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            <button
+              onClick={() => navigate('/dashboard')}
+              className="btn-secondary"
+            >
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Dashboard
+            </button>
+          </div>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-10">
         <div className="flex items-start justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-900">{project.name}</h1>
-            <p className="text-sm text-slate-500 mt-1">
+            <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">{project.name}</h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
               Status: <span className="font-medium">{project.status?.replace(/_/g, ' ')}</span>
             </p>
           </div>
@@ -108,9 +112,9 @@ export default function ProjectDetail() {
         )}
 
         {(project.status === 'ready' || project.status === 'ready_with_warnings') && (
-          <div className="border-t border-slate-200 pt-8">
-            <h2 className="text-lg font-semibold text-slate-900 mb-1">Request Changes</h2>
-            <p className="text-sm text-slate-500 mb-4">
+          <div className="border-t border-slate-200 dark:border-slate-700 pt-8">
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">Request Changes</h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
               Describe what you want to add, remove, or change in the app.
             </p>
             <textarea
@@ -118,7 +122,7 @@ export default function ProjectDetail() {
               onChange={(e) => setChangeRequest(e.target.value)}
               placeholder="e.g. Add a dark mode toggle, change the dashboard layout…"
               rows={5}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
+              className="w-full rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 bg-white dark:bg-slate-800 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
             />
             <button
               onClick={handleRequestChanges}
@@ -131,7 +135,7 @@ export default function ProjectDetail() {
         )}
 
         {project.modification_round != null && project.modification_round > 0 && (
-          <p className="text-xs text-slate-400 mt-8">
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-8">
             Modification round: {project.modification_round_completed ?? 0} / {project.modification_round}
           </p>
         )}

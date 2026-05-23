@@ -3,9 +3,11 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Markdown from 'react-markdown'
 import { toast } from 'sonner'
-import { ArrowLeft, CheckCircle2, Database, Layout, Loader2, Users } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Database, Layout, Loader2, Pencil, Users } from 'lucide-react'
 
 import Logo from '../components/Logo'
+import ThemeToggle from '../components/ThemeToggle'
+import EditRequirementsModal from '../components/EditRequirementsModal'
 import { approveProject } from '../api/approval'
 import { startGeneration } from '../api/generation'
 import { getProject } from '../api/projects'
@@ -15,6 +17,7 @@ export default function ProjectApproval() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [activeTab, setActiveTab] = useState('summary')
+  const [editOpen, setEditOpen] = useState(false)
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -56,21 +59,24 @@ export default function ProjectApproval() {
   const canApprove = project?.status === 'awaiting_approval' && !!project?.summary && !!project?.blueprint
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
         <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
           <Logo />
-          <Link to={`/projects/${projectId}`} className="btn-secondary text-sm">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back
-          </Link>
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            <Link to={`/projects/${projectId}`} className="btn-secondary text-sm">
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back
+            </Link>
+          </div>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-4">
         {/* Title + approval banner */}
         <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold text-slate-900">
+          <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">
             Review: {project?.name}
           </h1>
           {isApproved && (
@@ -82,15 +88,15 @@ export default function ProjectApproval() {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-2 border-b border-slate-200">
+        <div className="flex gap-2 border-b border-slate-200 dark:border-slate-700">
           {['summary', 'blueprint'].map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
               className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
                 activeTab === tab
-                  ? 'border-primary-600 text-primary-700'
-                  : 'border-transparent text-slate-500 hover:text-slate-800'
+                  ? 'border-primary-600 text-primary-700 dark:text-primary-400'
+                  : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
               }`}
             >
               {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -111,11 +117,11 @@ export default function ProjectApproval() {
 
         {/* Tab content — only shown once content is ready */}
         {!isGenerating && activeTab === 'summary' && (
-          <div className="card prose prose-slate max-w-none">
+          <div className="card prose prose-slate dark:prose-invert max-w-none">
             {project?.summary ? (
               <Markdown>{project.summary}</Markdown>
             ) : (
-              <p className="text-slate-500 not-prose">No summary available yet.</p>
+              <p className="text-slate-500 dark:text-slate-400 not-prose">No summary available yet.</p>
             )}
           </div>
         )}
@@ -128,11 +134,11 @@ export default function ProjectApproval() {
         <div className="flex gap-3 justify-end pt-2">
           <button
             className="btn-secondary"
-            onClick={() =>
-              toast.info('Request Changes will be available in a future update.')
-            }
+            onClick={() => setEditOpen(true)}
+            disabled={isGenerating}
           >
-            Request Changes
+            <Pencil className="w-4 h-4 mr-2" />
+            Edit requirements
           </button>
           <button
             className="btn-primary"
@@ -154,6 +160,12 @@ export default function ProjectApproval() {
           </button>
         </div>
       </main>
+
+      <EditRequirementsModal
+        projectId={projectId}
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+      />
     </div>
   )
 }
@@ -163,9 +175,9 @@ function renderDatabaseInFriendlyLanguage(tables) {
     <div className="card">
       <div className="flex items-center gap-2 mb-4">
         <Database className="w-5 h-5 text-primary-600" />
-        <h2 className="text-base font-semibold text-slate-800">What the System Remembers</h2>
+        <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100">What the System Remembers</h2>
       </div>
-      <p className="text-sm text-slate-500 mb-4">
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
         Behind the scenes, the app stores information so everything is saved and ready when you come back.
       </p>
       <div className="space-y-4">
@@ -176,8 +188,8 @@ function renderDatabaseInFriendlyLanguage(tables) {
           const readable = columnNames.map(toReadableColumn).join(', ')
           return (
             <div key={table.name} className="border-l-2 border-primary-100 pl-4">
-              <p className="text-sm font-semibold text-slate-800 mb-0.5">{toReadableTableName(table.name)}</p>
-              <p className="text-sm text-slate-600">
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 mb-0.5">{toReadableTableName(table.name)}</p>
+              <p className="text-sm text-slate-600 dark:text-slate-400">
                 {readable
                   ? `The system remembers: ${readable}.`
                   : table.description}
@@ -196,14 +208,14 @@ function renderRoutesInFriendlyLanguage(routes) {
     <div className="card">
       <div className="flex items-center gap-2 mb-4">
         <Users className="w-5 h-5 text-primary-600" />
-        <h2 className="text-base font-semibold text-slate-800">What Users Can Do</h2>
+        <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100">What Users Can Do</h2>
       </div>
-      <p className="text-sm text-slate-500 mb-4">
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
         Here are the things users will be able to do inside the app.
       </p>
       <ul className="space-y-2">
         {actions.map((action, i) => (
-          <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
+          <li key={i} className="flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300">
             <span className="mt-1 w-1.5 h-1.5 rounded-full bg-primary-400 flex-shrink-0" />
             {action}
           </li>
@@ -218,9 +230,9 @@ function renderPagesInFriendlyLanguage(pages) {
     <div className="card">
       <div className="flex items-center gap-2 mb-4">
         <Layout className="w-5 h-5 text-primary-600" />
-        <h2 className="text-base font-semibold text-slate-800">Screens Users Will See</h2>
+        <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100">Screens Users Will See</h2>
       </div>
-      <p className="text-sm text-slate-500 mb-4">
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
         The app will have these screens, each designed to make things simple and clear.
       </p>
       <ul className="space-y-3">
@@ -228,9 +240,9 @@ function renderPagesInFriendlyLanguage(pages) {
           <li key={page.name} className="flex items-start gap-2 text-sm">
             <span className="mt-1 w-1.5 h-1.5 rounded-full bg-primary-400 flex-shrink-0" />
             <span>
-              <span className="font-semibold text-slate-800">{page.name}</span>
-              <span className="text-slate-500"> — </span>
-              <span className="text-slate-700">{simplifyPurpose(page.purpose)}</span>
+              <span className="font-semibold text-slate-800 dark:text-slate-100">{page.name}</span>
+              <span className="text-slate-500 dark:text-slate-400"> — </span>
+              <span className="text-slate-700 dark:text-slate-300">{simplifyPurpose(page.purpose)}</span>
             </span>
           </li>
         ))}

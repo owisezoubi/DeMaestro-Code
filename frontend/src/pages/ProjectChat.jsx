@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
 
 import Logo from '../components/Logo'
+import ThemeToggle from '../components/ThemeToggle'
 import { getProjectStatus } from '../api/requirements'
 import { triggerStructuring, getClarifications, answerClarification } from '../api/structure'
 
@@ -65,14 +66,17 @@ export default function ProjectChat() {
   }, [projectId, qc])
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
         <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
           <Logo />
-          <Link to="/dashboard" className="btn-secondary text-sm">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back to dashboard
-          </Link>
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            <Link to="/dashboard" className="btn-secondary text-sm">
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back to dashboard
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -103,7 +107,7 @@ export default function ProjectChat() {
 function MainContent({ status, projectId, clarifications, clarificationsLoading, qc, navigate }) {
   if (!status) {
     return (
-      <div className="card flex items-center gap-3 text-slate-500">
+      <div className="card flex items-center gap-3 text-slate-500 dark:text-slate-400">
         <Loader2 className="w-5 h-5 animate-spin" />
         <span>Loading…</span>
       </div>
@@ -113,7 +117,7 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
   if (status === 'awaiting_input') {
     return (
       <div className="card flex flex-col items-center py-12 text-center">
-        <p className="text-slate-500 mb-4">No requirements submitted yet.</p>
+        <p className="text-slate-500 dark:text-slate-400 mb-4">No requirements submitted yet.</p>
         <Link to="/dashboard" className="btn-secondary">
           Go to dashboard
         </Link>
@@ -125,8 +129,8 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
     return (
       <div className="card flex flex-col items-center py-12 text-center">
         <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />
-        <p className="font-medium text-slate-900">Analyzing your requirements with AI…</p>
-        <p className="text-sm text-slate-500 mt-1">Usually 10–30 seconds.</p>
+        <p className="font-medium text-slate-900 dark:text-slate-100">Analyzing your requirements with AI…</p>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Usually 10–30 seconds.</p>
       </div>
     )
   }
@@ -135,9 +139,9 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
     return (
       <div className="space-y-4">
         {clarificationsLoading && (
-          <div className="p-4 bg-blue-50 rounded">
-            <p>Processing your answer...</p>
-            <p className="text-sm text-gray-600">This may take 30-60 seconds</p>
+          <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
+            <p className="text-blue-800 dark:text-blue-300">Processing your answer...</p>
+            <p className="text-sm text-blue-600 dark:text-blue-400">This may take 30-60 seconds</p>
           </div>
         )}
         <ClarificationCard
@@ -154,10 +158,10 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
     return (
       <div className="card flex flex-col items-center py-12 text-center">
         <CheckCircle2 className="w-10 h-10 text-emerald-500 mb-4" />
-        <h2 className="text-lg font-semibold text-slate-900 mb-1">
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">
           Your requirements are ready!
         </h2>
-        <p className="text-sm text-slate-500 mb-6">
+        <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
           We have everything we need to move forward.
         </p>
         <button
@@ -177,8 +181,8 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
   // blueprinting, generating, verifying, packaging, ready — future weeks
   return (
     <div className="card">
-      <p className="font-medium text-slate-900">Status: {status.replace(/_/g, ' ')}</p>
-      <p className="text-sm text-slate-500 mt-1">
+      <p className="font-medium text-slate-900 dark:text-slate-100">Status: {status.replace(/_/g, ' ')}</p>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
         {STATUS_DESC[status] ?? 'Processing…'}
       </p>
     </div>
@@ -196,8 +200,8 @@ function FailedCard({ projectId, qc }) {
   return (
     <div className="card flex flex-col items-center py-12 text-center">
       <AlertCircle className="w-10 h-10 text-red-500 mb-4" />
-      <h2 className="text-lg font-semibold text-slate-900 mb-1">Something went wrong</h2>
-      <p className="text-sm text-slate-500 mb-6">
+      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">Something went wrong</h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
         We couldn&apos;t analyze your requirements.
       </p>
       <button
@@ -249,7 +253,7 @@ function ClarificationCard({ clarifications, projectId, qc }) {
 
   if (!clarifications.length) {
     return (
-      <div className="card flex items-center gap-3 text-slate-500">
+      <div className="card flex items-center gap-3 text-slate-500 dark:text-slate-400">
         <Loader2 className="w-5 h-5 animate-spin" />
         <span>Loading questions…</span>
       </div>
@@ -260,7 +264,7 @@ function ClarificationCard({ clarifications, projectId, qc }) {
     return (
       <div className="card flex flex-col items-center py-12 text-center">
         <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />
-        <p className="text-slate-600">Refining your requirements…</p>
+        <p className="text-slate-600 dark:text-slate-400">Refining your requirements…</p>
       </div>
     )
   }
@@ -270,13 +274,13 @@ function ClarificationCard({ clarifications, projectId, qc }) {
 
   return (
     <div className="card space-y-4">
-      <p className="text-sm text-slate-500">
+      <p className="text-sm text-slate-500 dark:text-slate-400">
         {N} question{N === 1 ? '' : 's'} remaining
       </p>
 
-      <h2 className="text-base font-semibold text-slate-900">{current.reason}</h2>
+      <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">{current.reason}</h2>
 
-      <p className="text-sm text-slate-500">
+      <p className="text-sm text-slate-500 dark:text-slate-400">
         Pick the best option below, or type your own answer.
       </p>
 
@@ -285,23 +289,23 @@ function ClarificationCard({ clarifications, projectId, qc }) {
           <button
             key={opt}
             onClick={() => submit(opt)}
-            className="rounded-full bg-primary-50 text-primary-700 px-4 py-2 text-sm hover:bg-primary-100 transition-colors cursor-pointer"
+            className="rounded-full bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 px-4 py-2 text-sm hover:bg-primary-100 dark:hover:bg-primary-900/50 transition-colors cursor-pointer"
           >
             {opt}
           </button>
         ))}
         <button
           onClick={() => submit(current.suggested_options?.[0] ?? 'default')}
-          className="rounded-full bg-slate-100 text-slate-600 px-4 py-2 text-sm hover:bg-slate-200 transition-colors cursor-pointer"
+          className="rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 text-sm hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors cursor-pointer"
         >
           I don&apos;t know — pick a default
         </button>
       </div>
 
       <div className="flex items-center gap-3">
-        <div className="flex-1 border-t border-slate-200" />
-        <span className="text-xs text-slate-400">Or type your own answer:</span>
-        <div className="flex-1 border-t border-slate-200" />
+        <div className="flex-1 border-t border-slate-200 dark:border-slate-700" />
+        <span className="text-xs text-slate-400 dark:text-slate-500">Or type your own answer:</span>
+        <div className="flex-1 border-t border-slate-200 dark:border-slate-700" />
       </div>
 
       <div className="flex gap-2">

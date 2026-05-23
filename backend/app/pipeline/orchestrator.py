@@ -235,3 +235,69 @@ def apply_clarification_in_background(
         args=(uid, project_id, ambiguity_id, question, answer),
         daemon=True,
     ).start()
+
+
+# ---------- Revision ----------
+
+def _run_revision(uid: str, project_id: str, answers: list[dict], new_requirements: list[str]) -> None:
+    """Re-analyze original requirements + edited answers + new requirements."""
+    try:
+        latest = firestore_service.get_latest_structured_requirements(uid, project_id)
+        base_version = latest.version if latest else 0
+
+        raw_inputs = firestore_service.list_raw_inputs(uid, project_id)
+        parts = []
+        for ri in raw_inputs:
+            if ri.type == RawInputType.text and ri.content:
+                parts.append(ri.content)
+            elif ri.type == RawInputType.pdf and ri.extracted_text:
+                parts.append(ri.extracted_text)
+        combined = "\n\n".join(parts)
+
+        qa_lines = []
+        for a in answers:
+            q = (a.get("question") or "").strip()
+            ans = (a.get("answer") or "").strip()
+            if not ans:
+                continue
+            qa_lines.append(f"- Q: {q}\n  A: {ans}" if q else f"- {ans}")
+
+        new_lines = [f"- {r.strip()}" for r in new_requirements if r and r.strip()]
+
+        aug = combined
+        if qa_lines:
+            aug += ("\n\n## Clarifications already resolved (treat as authoritative)\n"
+                    + "\n".join(qa_lines))
+        if new_lines:
+            aug += "\n\n## Additional requirements from the user\n" + "\n".join(new_lines)
+
+        if not aug.strip():
+            firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
+            return
+
+        coordinator = RequirementsCoordinator()
+        sr = coordinator.analyze(aug)
+        # bump version so we never overwrite an existing version doc (v{n})
+        sr = sr.model_copy(update={"version": base_version + 1})
+
+        if len(sr.ambiguities) > _INITIAL_AMBIGUITY_CAP:
+            sr = sr.model_copy(update={"ambiguities": sr.ambiguities[:_INITIAL_AMBIGUITY_CAP]})
+
+        firestore_service.add_structured_requirements(uid, project_id, sr)
+        next_status = (ProjectStatus.awaiting_approval if not sr.ambiguities
+                       else ProjectStatus.clarifying)
+        firestore_service.set_project_status(uid, project_id, next_status)
+        if not sr.ambiguities:
+            _generate_and_store_summary_blueprint(uid, project_id)
+    except Exception as exc:
+        log.error("pipeline.revision.error", uid=uid, project_id=project_id, error=str(exc))
+        firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
+
+
+def kick_off_revision(uid: str, project_id: str, answers: list[dict], new_requirements: list[str]) -> None:
+    """Run a requirements revision in a background daemon thread."""
+    threading.Thread(
+        target=_run_revision,
+        args=(uid, project_id, answers, new_requirements),
+        daemon=True,
+    ).start()

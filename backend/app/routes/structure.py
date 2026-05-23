@@ -1,5 +1,6 @@
 """Structuring and clarification endpoints (W3-B)."""
 import asyncio
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import JSONResponse
@@ -137,3 +138,63 @@ async def answer_clarification(
         )
 
     return {"project_id": project_id, "status": "applied_clarification"}
+
+
+# ---------- Revision ----------
+
+class QAItem(BaseModel):
+    question: str = ""
+    answer: str = Field(..., min_length=1)
+    ambiguity_id: Optional[str] = None
+
+
+class ReviseRequest(BaseModel):
+    answers: list[QAItem] = []
+    new_requirements: list[str] = []
+
+
+_REVISABLE = {
+    ProjectStatus.awaiting_approval,
+    ProjectStatus.clarifying,
+    ProjectStatus.ready,
+    ProjectStatus.ready_with_warnings,
+    ProjectStatus.failed,
+}
+
+
+@router.get("/{project_id}/clarification-history")
+async def clarification_history(project_id: str, user: CurrentUser):
+    """Return all clarification Q&A turns (oldest first) for display in the editor."""
+    _require_project(user.uid, project_id)
+    return firestore_service.list_clarification_turns(user.uid, project_id)
+
+
+@router.post("/{project_id}/requirements/revise", status_code=status.HTTP_202_ACCEPTED)
+async def revise_requirements(project_id: str, payload: ReviseRequest, user: CurrentUser):
+    """Re-run requirements analysis with edited answers + new requirements."""
+    project = _require_project(user.uid, project_id)
+    if project.status not in _REVISABLE:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot edit requirements while project is '{project.status.value}'",
+        )
+
+    cleaned_new = [r.strip() for r in payload.new_requirements if r and r.strip()]
+    answers = [a.model_dump() for a in payload.answers if a.answer.strip()]
+    if not answers and not cleaned_new:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nothing to revise — provide at least one answer or a new requirement",
+        )
+
+    firestore_service.update_project(user.uid, project_id, {
+        "status": ProjectStatus.structuring,
+        "summary": None,
+        "blueprint": None,
+        "approved_at": None,
+        "clarification_round": 0,
+        "resolved_topics": [],
+        "last_error": None,
+    })
+    pipeline.kick_off_revision(user.uid, project_id, answers, cleaned_new)
+    return {"project_id": project_id, "status": "structuring"}

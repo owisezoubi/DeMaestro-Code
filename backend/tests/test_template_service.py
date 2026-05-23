@@ -32,6 +32,10 @@ _EXPECTED_PATHS = [
     "docker-compose.yml",
     ".env.example",
     "SETUP.md",
+    "setup.sh",
+    "start.sh",
+    "setup.bat",
+    "start.bat",
 ]
 
 
@@ -110,3 +114,15 @@ def test_backend_dockerfile_uses_python_312():
 def test_requirements_txt_uses_psycopg2_binary_2_9_10():
     templates = load_stack_templates("python-postgres", "App", "app")
     assert "psycopg2-binary==2.9.10" in templates["backend/requirements.txt"]
+
+
+def test_template_includes_setup_scripts():
+    templates = load_stack_templates("python-postgres", "App", "app")
+    for script in ("setup.sh", "start.sh", "setup.bat", "start.bat"):
+        assert script in templates, f"Missing setup script: {script}"
+
+
+def test_setup_sh_substitutes_app_name_placeholder():
+    templates = load_stack_templates("python-postgres", "MyGreatApp", "my-great-app")
+    assert "MyGreatApp" in templates["setup.sh"]
+    assert "{{app_name}}" not in templates["setup.sh"]

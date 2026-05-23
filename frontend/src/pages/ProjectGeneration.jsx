@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 
 import Logo from '../components/Logo'
+import ThemeToggle from '../components/ThemeToggle'
 import { getGenerationStatus } from '../api/generation'
 
 // Ordered pipeline stages — each maps to one or more project statuses
@@ -91,7 +92,7 @@ export default function ProjectGeneration() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-primary-600" />
       </div>
     )
@@ -99,7 +100,7 @@ export default function ProjectGeneration() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex items-center justify-center">
         <div className="card w-96 border-red-200 bg-red-50">
           <h2 className="text-base font-semibold text-red-700 mb-2">Error Loading Status</h2>
           <p className="text-sm text-red-600 mb-4">{error.friendlyMessage || error.message}</p>
@@ -117,24 +118,27 @@ export default function ProjectGeneration() {
   const isInProgress = !isDone && !isFailed
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <header className="border-b border-slate-200 bg-white">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center justify-between">
           <Logo />
-          <Link to="/dashboard" className="btn-secondary text-sm">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Dashboard
-          </Link>
+          <div className="flex items-center gap-3">
+            <ThemeToggle />
+            <Link to="/dashboard" className="btn-secondary text-sm">
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Dashboard
+            </Link>
+          </div>
         </div>
       </header>
 
       <main className="max-w-3xl mx-auto px-4 py-8 space-y-6">
         {/* Page title */}
         <div className="text-center">
-          <h1 className="text-2xl font-semibold text-slate-900 mb-1">
+          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 mb-1">
             {isDone ? 'Your App is Ready!' : isFailed ? 'Generation Failed' : 'Building Your App'}
           </h1>
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
             {isDone && 'Your application has been generated and packaged.'}
             {isFailed && 'Something went wrong. See the error below.'}
             {isInProgress && 'Hang tight — Claude is writing your complete application…'}
@@ -155,7 +159,7 @@ export default function ProjectGeneration() {
                   {!isLast && (
                     <div
                       className={`absolute top-6 left-1/2 w-full h-0.5 transition-colors duration-500 ${
-                        state === 'completed' ? 'bg-emerald-400' : 'bg-slate-200'
+                        state === 'completed' ? 'bg-emerald-400' : 'bg-slate-200 dark:bg-slate-700'
                       }`}
                     />
                   )}
@@ -169,7 +173,7 @@ export default function ProjectGeneration() {
                         ? 'bg-primary-100 text-primary-600 ring-2 ring-primary-400 animate-pulse'
                         : state === 'failed'
                         ? 'bg-red-100 text-red-500'
-                        : 'bg-slate-100 text-slate-400'
+                        : 'bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500'
                     }`}
                   >
                     {state === 'completed' ? (
@@ -183,12 +187,12 @@ export default function ProjectGeneration() {
 
                   <p
                     className={`text-xs font-semibold text-center ${
-                      state === 'active' ? 'text-primary-700' : 'text-slate-500'
+                      state === 'active' ? 'text-primary-700 dark:text-primary-400' : 'text-slate-500 dark:text-slate-400'
                     }`}
                   >
                     {stage.label}
                   </p>
-                  <p className="text-xs text-slate-400 text-center mt-0.5 hidden sm:block">
+                  <p className="text-xs text-slate-400 dark:text-slate-500 text-center mt-0.5 hidden sm:block">
                     {stage.description}
                   </p>
                 </div>
@@ -202,12 +206,12 @@ export default function ProjectGeneration() {
           <div className="card space-y-4">
             <div className="flex items-center gap-2">
               <Loader2 className="w-4 h-4 animate-spin text-primary-600" />
-              <h2 className="text-sm font-semibold text-slate-700">Current Activity</h2>
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Current Activity</h2>
             </div>
 
             <div>
-              <p className="text-xs text-slate-500 uppercase tracking-wide mb-1">Status</p>
-              <p className="text-sm font-medium text-primary-700 capitalize">
+              <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">Status</p>
+              <p className="text-sm font-medium text-primary-700 dark:text-primary-400 capitalize">
                 {currentStatus.replace(/_/g, ' ')}
               </p>
             </div>
@@ -215,13 +219,13 @@ export default function ProjectGeneration() {
             {/* File generation progress bar */}
             {status?.total_files > 0 && (
               <div>
-                <div className="flex justify-between text-xs text-slate-500 mb-1">
+                <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
                   <span>Files generated</span>
                   <span>
                     {status.generated_count ?? 0} / {status.total_files}
                   </span>
                 </div>
-                <div className="w-full bg-slate-200 rounded-full h-1.5">
+                <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-1.5">
                   <div
                     className="bg-primary-600 h-1.5 rounded-full transition-all duration-500"
                     style={{
@@ -237,7 +241,7 @@ export default function ProjectGeneration() {
             {/* Test results checks */}
             {status?.test_results?.passed_checks && (
               <div>
-                <p className="text-xs text-slate-500 uppercase tracking-wide mb-2">Test Results</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Test Results</p>
                 <div className="grid grid-cols-2 gap-2">
                   {Object.entries(status.test_results.passed_checks).map(([check, passed]) => (
                     <div key={check} className="flex items-center gap-1.5">
@@ -246,7 +250,7 @@ export default function ProjectGeneration() {
                       ) : (
                         <AlertCircle size={14} className="text-red-500 flex-shrink-0" />
                       )}
-                      <span className="text-xs text-slate-600 capitalize">{check}</span>
+                      <span className="text-xs text-slate-600 dark:text-slate-400 capitalize">{check}</span>
                     </div>
                   ))}
                 </div>
@@ -326,8 +330,8 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog }) {
 
       {/* Download */}
       <div className="card space-y-3">
-        <h3 className="text-sm font-semibold text-slate-700">Download your code</h3>
-        <p className="text-sm text-slate-500">
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Download your code</h3>
+        <p className="text-sm text-slate-500 dark:text-slate-400">
           Your project is packaged as a ZIP archive. The download link is valid for 7 days.
         </p>
         {zipUrl ? (
@@ -374,7 +378,7 @@ function ErrorScreen({ errorMessage }) {
         </div>
       )}
 
-      <p className="text-sm text-slate-600">
+      <p className="text-sm text-slate-600 dark:text-slate-400">
         Something went wrong during code generation. You can try again or contact support.
       </p>
 

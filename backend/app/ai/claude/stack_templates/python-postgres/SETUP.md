@@ -1,34 +1,39 @@
-# {{app_name}} — Setup Guide
+# Running {{app_name}} locally
 
-## Quick Start (Docker Compose)
+## Option 1 — One-command setup (recommended)
+
+**Mac/Linux:**
+```bash
+bash setup.sh       # one-time setup (creates venv, installs deps)
+bash start.sh       # starts backend + frontend
+```
+
+**Windows:**
+```batch
+setup.bat
+start.bat
+```
+
+Then open http://localhost:5173 in your browser.
+
+## Option 2 — Docker (no Python or Node needed locally)
 
 ```bash
-cp .env.example .env
 docker compose up --build
 ```
 
-The app will be available at:
+Open http://localhost:5173.
 
-- **Frontend:** http://localhost:5173
-- **Backend API:** http://localhost:8000
-- **API Docs (Swagger):** http://localhost:8000/docs
-
-## Manual Setup
-
-### Prerequisites
-
-- Python 3.12+
-- Node.js 20+
-- PostgreSQL 16+
+## Option 3 — Manual setup (if you prefer)
 
 ### Backend
 
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp ../.env.example ../.env   # edit DATABASE_URL to point to your Postgres instance
+cp ../.env.example ../.env         # then edit ../.env
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -40,14 +45,6 @@ npm install
 npm run dev
 ```
 
-Frontend will be available at http://localhost:5173.
+## Configuration
 
-## Environment Variables
-
-Copy `.env.example` to `.env` and update:
-
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string |
-| `JWT_SECRET_KEY` | Secret for JWT signing — change before deploying |
-| `VITE_API_BASE_URL` | URL the frontend uses to reach the backend |
+Edit `.env` at the project root. The defaults work for local Docker Compose; for manual setup, you'll need to point `DATABASE_URL` at a running Postgres instance (or use Docker for just the database: `docker compose up db`).

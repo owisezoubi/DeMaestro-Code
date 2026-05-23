@@ -4,6 +4,7 @@ import { toast } from 'sonner'
 
 import { useAuth } from '../context/AuthContext'
 import Logo from '../components/Logo'
+import ThemeToggle from '../components/ThemeToggle'
 
 export default function Login() {
   const { login } = useAuth()
@@ -27,19 +28,20 @@ export default function Login() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
+    <div className="relative flex min-h-screen items-center justify-center px-4 bg-slate-50 dark:bg-slate-900">
+      <ThemeToggle className="absolute top-4 right-4" />
       <div className="w-full max-w-sm">
         <div className="flex justify-center mb-8">
           <Logo />
         </div>
         <div className="card">
-          <h1 className="text-xl font-semibold text-slate-900 mb-1">Sign in</h1>
-          <p className="text-sm text-slate-500 mb-6">
+          <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-1">Sign in</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
             Welcome back. Sign in to access your projects.
           </p>
           <form onSubmit={onSubmit} className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                 Email
               </label>
               <input
@@ -52,7 +54,7 @@ export default function Login() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                 Password
               </label>
               <input
@@ -68,7 +70,7 @@ export default function Login() {
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
-          <p className="text-sm text-slate-600 mt-6 text-center">
+          <p className="text-sm text-slate-600 dark:text-slate-400 mt-6 text-center">
             No account?{' '}
             <Link to="/signup" className="text-primary-600 hover:underline">
               Sign up

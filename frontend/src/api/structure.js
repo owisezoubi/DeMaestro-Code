@@ -33,3 +33,22 @@ export async function answerClarification(projectId, ambiguityId, answer) {
   )
   return r.data
 }
+
+export async function getClarificationHistory(projectId) {
+  try {
+    const r = await api.get(`/projects/${projectId}/clarification-history`)
+    return r.data
+  } catch (err) {
+    if (err.response?.status === 404) return []
+    throw err
+  }
+}
+
+export async function reviseRequirements(projectId, { answers, newRequirements }) {
+  const r = await api.post(
+    `/projects/${projectId}/requirements/revise`,
+    { answers, new_requirements: newRequirements },
+    { timeout: 300000 },
+  )
+  return r.data
+}

@@ -7,7 +7,7 @@ import { ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
 import Logo from '../components/Logo'
 import ThemeToggle from '../components/ThemeToggle'
 import { getProjectStatus } from '../api/requirements'
-import { triggerStructuring, getClarifications, answerClarification } from '../api/structure'
+import { triggerStructuring, getClarifications, answerClarificationsBatch } from '../api/structure'
 
 const TERMINAL = new Set(['ready', 'ready_with_warnings', 'failed', 'awaiting_approval'])
 
@@ -137,20 +137,12 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
 
   if (status === 'clarifying') {
     return (
-      <div className="space-y-4">
-        {clarificationsLoading && (
-          <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-200 dark:border-blue-800">
-            <p className="text-blue-800 dark:text-blue-300">Processing your answer...</p>
-            <p className="text-sm text-blue-600 dark:text-blue-400">This may take 30-60 seconds</p>
-          </div>
-        )}
-        <ClarificationCard
-          key={clarifications[0]?.id ?? 'none'}
-          clarifications={clarifications}
-          projectId={projectId}
-          qc={qc}
-        />
-      </div>
+      <ClarificationWizard
+        key={clarifications.map((c) => c.id).join('|') || 'none'}
+        clarifications={clarifications}
+        projectId={projectId}
+        qc={qc}
+      />
     )
   }
 
@@ -215,118 +207,110 @@ function FailedCard({ projectId, qc }) {
   )
 }
 
-function ClarificationCard({ clarifications, projectId, qc }) {
+function ClarificationWizard({ clarifications, projectId, qc }) {
+  const idsKey = clarifications.map((c) => c.id).join('|')
+  const [index, setIndex] = useState(0)
+  const [answers, setAnswers] = useState({})
   const [freeText, setFreeText] = useState('')
 
-  const answerMut = useMutation({
-    mutationFn: ({ ambiguityId, answer }) =>
-      answerClarification(projectId, ambiguityId, answer),
+  useEffect(() => { setIndex(0); setAnswers({}); setFreeText('') }, [idsKey])
+
+  const submitMut = useMutation({
+    mutationFn: (all) => answerClarificationsBatch(projectId, all),
     onSuccess: async () => {
       await Promise.all([
-        qc.refetchQueries({ queryKey: ['clarifications', projectId], type: 'all' }),
         qc.refetchQueries({ queryKey: ['project-status', projectId], type: 'all' }),
+        qc.refetchQueries({ queryKey: ['clarifications', projectId], type: 'all' }),
       ])
-      setTimeout(() => {
-        qc.refetchQueries({ queryKey: ['clarifications', projectId], type: 'all' })
-      }, 300)
-    },
-    onSettled: () => {
-      setFreeText('')
     },
     onError: (err) => {
       const msg = err.friendlyMessage || err.message || ''
-      const isTimeout =
-        err.response?.status === 504 ||
-        err.code === 'ECONNABORTED' ||
-        msg.toLowerCase().includes('timeout')
-      if (isTimeout) {
-        toast.info('Still processing — this can take 1–2 minutes')
-      } else {
-        toast.error(msg || 'Failed to submit answer. Please try again.')
-      }
+      const isTimeout = err.response?.status === 504 || err.code === 'ECONNABORTED' || msg.toLowerCase().includes('timeout')
+      if (isTimeout) toast.info('Still refining — this can take a minute')
+      else toast.error(msg || 'Failed to submit answers. Please try again.')
     },
   })
 
-  function submit(answer) {
-    answerMut.mutate({ ambiguityId: clarifications[0].id, answer })
-  }
-
-  if (!clarifications.length) {
-    return (
-      <div className="card flex items-center gap-3 text-slate-500 dark:text-slate-400">
-        <Loader2 className="w-5 h-5 animate-spin" />
-        <span>Loading questions…</span>
-      </div>
-    )
-  }
-
-  if (answerMut.isPending) {
+  if (submitMut.isPending) {
     return (
       <div className="card flex flex-col items-center py-12 text-center">
         <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />
-        <p className="text-slate-600 dark:text-slate-400">Refining your requirements…</p>
+        <p className="font-medium text-slate-900 dark:text-slate-100">Refining your requirements…</p>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+          You answered everything — this part takes a moment.
+        </p>
+      </div>
+    )
+  }
+  if (!clarifications.length) {
+    return (
+      <div className="card flex items-center gap-3 text-slate-500 dark:text-slate-400">
+        <Loader2 className="w-5 h-5 animate-spin" /><span>Loading questions…</span>
       </div>
     )
   }
 
-  const current = clarifications[0]
-  const N = clarifications.length
+  const total = clarifications.length
+  const current = clarifications[index]
+  const isLast = index === total - 1
+
+  function record(answer) {
+    const next = { ...answers, [current.id]: answer }
+    setAnswers(next)
+    setFreeText('')
+    if (isLast) {
+      submitMut.mutate(clarifications.map((c) => ({ ambiguity_id: c.id, answer: next[c.id] ?? '' })))
+    } else {
+      setIndex((i) => i + 1)
+    }
+  }
 
   return (
     <div className="card space-y-4">
-      <p className="text-sm text-slate-500 dark:text-slate-400">
-        {N} question{N === 1 ? '' : 's'} remaining
-      </p>
+      {/* progress */}
+      <div>
+        <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
+          <span>Question {index + 1} of {total}</span>
+          {index > 0 && (
+            <button onClick={() => setIndex((i) => Math.max(0, i - 1))}
+              className="hover:text-slate-800 dark:hover:text-slate-200">← Back</button>
+          )}
+        </div>
+        <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
+          <div className="h-full bg-primary-600 transition-all"
+               style={{ width: `${((index) / total) * 100}%` }} />
+        </div>
+      </div>
 
       <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">{current.reason}</h2>
-
-      <p className="text-sm text-slate-500 dark:text-slate-400">
-        Pick the best option below, or type your own answer.
-      </p>
+      <p className="text-sm text-slate-500 dark:text-slate-400">Pick the best option, or type your own.</p>
 
       <div className="flex flex-wrap gap-2">
         {(current.suggested_options ?? []).map((opt) => (
-          <button
-            key={opt}
-            onClick={() => submit(opt)}
-            className="rounded-full bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 px-4 py-2 text-sm hover:bg-primary-100 dark:hover:bg-primary-900/50 transition-colors cursor-pointer"
-          >
+          <button key={opt} onClick={() => record(opt)}
+            className="rounded-full bg-primary-50 dark:bg-primary-600/20 text-primary-700 dark:text-primary-200 px-4 py-2 text-sm hover:bg-primary-100 dark:hover:bg-primary-600/30 transition-colors">
             {opt}
           </button>
         ))}
-        <button
-          onClick={() => submit(current.suggested_options?.[0] ?? 'default')}
-          className="rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 text-sm hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors cursor-pointer"
-        >
+        <button onClick={() => record(current.suggested_options?.[0] ?? 'No preference')}
+          className="rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 text-sm hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
           I don&apos;t know — pick a default
         </button>
       </div>
 
       <div className="flex items-center gap-3">
         <div className="flex-1 border-t border-slate-200 dark:border-slate-700" />
-        <span className="text-xs text-slate-400 dark:text-slate-500">Or type your own answer:</span>
+        <span className="text-xs text-slate-400">Or type your own:</span>
         <div className="flex-1 border-t border-slate-200 dark:border-slate-700" />
       </div>
 
       <div className="flex gap-2">
-        <input
-          type="text"
-          value={freeText}
-          onChange={(e) => setFreeText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && freeText.trim()) submit(freeText.trim())
-          }}
-          placeholder="Type your answer…"
-          className="input flex-1"
-        />
-        <button
-          disabled={!freeText.trim()}
-          onClick={() => {
-            if (freeText.trim()) submit(freeText.trim())
-          }}
-          className="btn-primary"
-        >
-          Send
+        <input type="text" value={freeText} onChange={(e) => setFreeText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && freeText.trim()) record(freeText.trim()) }}
+          placeholder="Type your answer…" className="input flex-1" />
+        <button disabled={!freeText.trim()} onClick={() => { if (freeText.trim()) record(freeText.trim()) }}
+          className="btn-primary">
+          {isLast ? 'Finish' : 'Next'}
         </button>
       </div>
     </div>

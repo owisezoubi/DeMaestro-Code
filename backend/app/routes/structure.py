@@ -140,6 +140,55 @@ async def answer_clarification(
     return {"project_id": project_id, "status": "applied_clarification"}
 
 
+# ---------- Batch clarifications ----------
+
+class BatchAnswerItem(BaseModel):
+    ambiguity_id: str
+    answer: str = Field(..., min_length=1)
+
+
+class BatchAnswersPayload(BaseModel):
+    answers: list[BatchAnswerItem] = Field(..., min_length=1)
+
+
+@router.post("/{project_id}/clarifications/answers")
+async def answer_clarifications_batch(
+    project_id: str, payload: BatchAnswersPayload, user: CurrentUser
+):
+    """Submit a full round of answers in one batch and refine once."""
+    project = _require_project(user.uid, project_id)
+    if project.status != ProjectStatus.clarifying:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Project is in status '{project.status}' — must be 'clarifying'",
+        )
+    sr = firestore_service.get_latest_structured_requirements(user.uid, project_id)
+    if sr is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No structured requirements yet"
+        )
+    answers = [a.model_dump() for a in payload.answers]
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                pipeline._run_apply_clarifications_batch, user.uid, project_id, answers
+            ),
+            timeout=600,
+        )
+    except asyncio.TimeoutError:
+        firestore_service.update_project(
+            user.uid, project_id, {"last_error": "Batch clarification timeout"}
+        )
+        return JSONResponse(
+            status_code=504,
+            content={
+                "detail": "AI still refining — answers may still apply",
+                "status": "still_processing",
+            },
+        )
+    return {"project_id": project_id, "status": "applied_batch"}
+
+
 # ---------- Revision ----------
 
 class QAItem(BaseModel):
@@ -187,6 +236,9 @@ async def revise_requirements(project_id: str, payload: ReviseRequest, user: Cur
             detail="Nothing to revise — provide at least one answer or a new requirement",
         )
 
+    existing_added = project.user_added_requirements or []
+    merged_added = existing_added + [r for r in cleaned_new if r not in existing_added]
+
     firestore_service.update_project(user.uid, project_id, {
         "status": ProjectStatus.structuring,
         "summary": None,
@@ -195,6 +247,7 @@ async def revise_requirements(project_id: str, payload: ReviseRequest, user: Cur
         "clarification_round": 0,
         "resolved_topics": [],
         "last_error": None,
+        "user_added_requirements": merged_added,
     })
     pipeline.kick_off_revision(user.uid, project_id, answers, cleaned_new)
     return {"project_id": project_id, "status": "structuring"}

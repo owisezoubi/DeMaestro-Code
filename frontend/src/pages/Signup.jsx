@@ -23,7 +23,7 @@ export default function Signup() {
     try {
       await signup(email, password)
       toast.success('Account created')
-      navigate('/dashboard', { replace: true })
+      navigate('/welcome', { replace: true })
     } catch (err) {
       toast.error(err.message || 'Signup failed')
     } finally {

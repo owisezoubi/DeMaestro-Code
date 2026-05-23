@@ -77,6 +77,35 @@ class ClarificationAgent(GeminiAgent):
         )
         return result
 
+    def apply_answers(
+        self,
+        current: StructuredRequirements,
+        answers: list[dict],
+    ) -> StructuredRequirements:
+        """Apply multiple clarification answers in one pass.
+        answers: [{"ambiguity_id": str, "answer": str}, ...]"""
+        if self.is_mock():
+            answered = {a["ambiguity_id"] for a in answers}
+            result = current.model_copy(update={
+                "version": current.version + 1,
+                "ambiguities": [a for a in current.ambiguities if a.id not in answered],
+            })
+        else:
+            system_prompt = self._load_prompt()
+            user_content = (
+                f"Current requirements:\n{current.model_dump_json(indent=2)}\n\n"
+                f"Clarification answers:\n"
+                f"{json.dumps([{'question_id': a['ambiguity_id'], 'answer': a['answer']} for a in answers], indent=2)}"
+            )
+            result = self._call_gemini(
+                system_prompt=system_prompt,
+                user_content=user_content,
+                response_model=StructuredRequirements,
+                stage="apply_clarifications_batch",
+            )
+        self._set_state(last_answered_count=len(answers), last_version_after=result.version)
+        return result
+
     def process(
         self,
         sr: StructuredRequirements,

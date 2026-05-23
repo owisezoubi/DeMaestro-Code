@@ -3,12 +3,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Markdown from 'react-markdown'
 import { toast } from 'sonner'
-import { ArrowLeft, CheckCircle2, Database, Layout, Loader2, Pencil, Users } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Database, Layout, Loader2, Pencil, Plus, Users } from 'lucide-react'
 
 import Logo from '../components/Logo'
 import ThemeToggle from '../components/ThemeToggle'
 import EditRequirementsModal from '../components/EditRequirementsModal'
 import { approveProject } from '../api/approval'
+import { getClarificationHistory } from '../api/structure'
 import { startGeneration } from '../api/generation'
 import { getProject } from '../api/projects'
 
@@ -117,13 +118,19 @@ export default function ProjectApproval() {
 
         {/* Tab content — only shown once content is ready */}
         {!isGenerating && activeTab === 'summary' && (
-          <div className="card prose prose-slate dark:prose-invert max-w-none">
-            {project?.summary ? (
-              <Markdown>{project.summary}</Markdown>
-            ) : (
-              <p className="text-slate-500 dark:text-slate-400 not-prose">No summary available yet.</p>
-            )}
-          </div>
+          <>
+            <YourInputCard
+              projectId={projectId}
+              addedRequirements={project?.user_added_requirements}
+            />
+            <div className="card prose prose-slate dark:prose-invert max-w-none">
+              {project?.summary ? (
+                <Markdown>{project.summary}</Markdown>
+              ) : (
+                <p className="text-slate-500 dark:text-slate-400 not-prose">No summary available yet.</p>
+              )}
+            </div>
+          </>
         )}
 
         {!isGenerating && activeTab === 'blueprint' && (
@@ -166,6 +173,56 @@ export default function ProjectApproval() {
         open={editOpen}
         onClose={() => setEditOpen(false)}
       />
+    </div>
+  )
+}
+
+function YourInputCard({ projectId, addedRequirements = [] }) {
+  const { data: history = [] } = useQuery({
+    queryKey: ['clarification-history', projectId],
+    queryFn: () => getClarificationHistory(projectId),
+  })
+  const decisions = (history ?? []).filter((t) => t.answer)
+  const added = addedRequirements ?? []
+  if (decisions.length === 0 && added.length === 0) return null
+
+  return (
+    <div className="card border-l-4 border-primary-500 bg-primary-50/40 dark:bg-primary-600/10 mb-4">
+      <div className="flex items-center gap-2 mb-3">
+        <CheckCircle2 className="w-5 h-5 text-primary-600" />
+        <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100">
+          Your input — built into the blueprint
+        </h2>
+      </div>
+
+      {decisions.length > 0 && (
+        <div className="space-y-3 mb-4">
+          <p className="text-xs uppercase tracking-wide text-slate-400">Decisions you made</p>
+          {decisions.map((t) => (
+            <div key={t.id} className="text-sm">
+              <p className="text-slate-500 dark:text-slate-400">{t.question}</p>
+              <p className="text-slate-900 dark:text-slate-100 font-medium flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 flex-shrink-0" />
+                {t.answer}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {added.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-xs uppercase tracking-wide text-slate-400">Requirements you added</p>
+          <ul className="space-y-1">
+            {added.map((r, i) => (
+              <li key={i} className="text-sm text-slate-900 dark:text-slate-100 flex items-start gap-2">
+                <Plus className="w-3.5 h-3.5 mt-0.5 text-primary-500 flex-shrink-0" />
+                {r}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

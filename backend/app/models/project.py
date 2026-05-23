@@ -64,6 +64,7 @@ class ProjectMeta(BaseModel):
     install_error_log: Optional[str] = None  # raw pip/npm output when install fails; kept for debugging
     test_error_log: Optional[str] = None  # raw test/boot errors (capped 5000 chars) for user inspection
     resolved_topics: list[str] = []
+    user_added_requirements: list[str] = []
     last_change_request: Optional[str] = None
     modification_round: Optional[int] = None
     modification_round_completed: Optional[int] = None

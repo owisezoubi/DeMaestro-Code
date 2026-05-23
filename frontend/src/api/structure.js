@@ -44,6 +44,16 @@ export async function getClarificationHistory(projectId) {
   }
 }
 
+export async function answerClarificationsBatch(projectId, answers) {
+  // answers: [{ ambiguity_id, answer }]
+  const r = await api.post(
+    `/projects/${projectId}/clarifications/answers`,
+    { answers },
+    { timeout: 600000 },
+  )
+  return r.data
+}
+
 export async function reviseRequirements(projectId, { answers, newRequirements }) {
   const r = await api.post(
     `/projects/${projectId}/requirements/revise`,

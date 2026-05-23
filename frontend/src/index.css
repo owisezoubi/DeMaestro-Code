@@ -11,31 +11,39 @@ body,
 }
 
 @layer base {
-  body { @apply bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100; }
+  /* Global scale-up for readability (bump to 18px for even larger) */
+  html {
+    font-size: 17px;
+  }
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+  }
 }
 
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium
+    @apply inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-base font-medium
       transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2
-      disabled:opacity-50 disabled:pointer-events-none;
+      disabled:opacity-50 disabled:pointer-events-none
+      dark:focus:ring-offset-slate-900;
   }
   .btn-primary {
-    @apply btn bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-600;
+    @apply btn bg-primary-600 text-white hover:bg-primary-700 focus:ring-primary-600
+      dark:bg-primary-500 dark:hover:bg-primary-400;
   }
   .btn-secondary {
     @apply btn bg-white text-primary-700 border border-primary-200 hover:bg-primary-50
       focus:ring-primary-400
-      dark:bg-slate-800 dark:text-primary-100 dark:border-slate-600 dark:hover:bg-slate-700;
+      dark:bg-slate-800 dark:text-slate-100 dark:border-slate-600 dark:hover:bg-slate-700;
   }
   .input {
-    @apply block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm
+    @apply block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-base
       placeholder-slate-400 focus:border-primary-600 focus:outline-none focus:ring-1
       focus:ring-primary-600
-      dark:bg-slate-800 dark:border-slate-600 dark:text-slate-100 dark:placeholder-slate-500;
+      dark:bg-slate-900 dark:border-slate-600 dark:text-slate-100 dark:placeholder-slate-500;
   }
   .card {
-    @apply bg-white shadow-sm border border-slate-200 rounded-xl p-6
-      dark:bg-slate-800 dark:border-slate-700;
+    @apply bg-white shadow-md border border-slate-200 rounded-2xl p-7
+      dark:bg-slate-900 dark:border-slate-700;
   }
 }

@@ -26,6 +26,7 @@ export default function EditRequirementsModal({ projectId, open, onClose }) {
           ambiguity_id: t.ambiguity_id ?? null,
           question: t.question ?? '',
           answer: t.answer ?? '',
+          suggested_options: t.suggested_options ?? [],
         })),
       )
       setNewReqs([''])
@@ -117,6 +118,24 @@ export default function EditRequirementsModal({ projectId, open, onClose }) {
                 {answers.map((a, i) => (
                   <div key={i} className="rounded-lg border border-slate-200 dark:border-slate-700 p-3">
                     <p className="text-sm font-medium text-slate-800 dark:text-slate-100 mb-2">{a.question}</p>
+                    {(a.suggested_options ?? []).length > 0 && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {a.suggested_options.map((opt) => (
+                          <button
+                            key={opt}
+                            type="button"
+                            onClick={() => setAnswer(i, opt)}
+                            className={`rounded-full px-3 py-1 text-xs transition-colors ${
+                              a.answer === opt
+                                ? 'bg-primary-600 text-white'
+                                : 'bg-primary-50 dark:bg-primary-600/20 text-primary-700 dark:text-primary-200 hover:bg-primary-100 dark:hover:bg-primary-600/30'
+                            }`}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                     <textarea
                       value={a.answer}
                       onChange={(e) => setAnswer(i, e.target.value)}

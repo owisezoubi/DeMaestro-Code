@@ -9,6 +9,19 @@ import ThemeToggle from '../components/ThemeToggle'
 import { useAuth } from '../context/AuthContext'
 import { listProjects, ensureUserProfile, deleteProject } from '../api/projects'
 
+function routeForStatus(status, id) {
+  const approval = new Set(['awaiting_approval', 'approved'])
+  const generation = new Set([
+    'blueprinting', 'generating', 'generated', 'testing', 'tested',
+    'verifying', 'verified', 'deploying', 'packaging',
+  ])
+  const detail = new Set(['ready', 'ready_with_warnings', 'deployed', 'modifying', 'regenerating'])
+  if (approval.has(status)) return `/projects/${id}/approve`
+  if (generation.has(status)) return `/projects/${id}/generation`
+  if (detail.has(status)) return `/projects/${id}/detail`
+  return `/projects/${id}` // awaiting_input, structuring, clarifying, failed → ProjectChat
+}
+
 export default function Dashboard() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
@@ -128,7 +141,7 @@ export default function Dashboard() {
               <li
                 key={p.id}
                 className="card hover:shadow-md transition-shadow cursor-pointer"
-                onClick={() => navigate(`/projects/${p.id}`)}
+                onClick={() => navigate(routeForStatus(p.status, p.id))}
               >
                 <div className="flex items-start justify-between mb-2">
                   <FolderOpen className="w-5 h-5 text-primary-600" />

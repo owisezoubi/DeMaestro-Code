@@ -15,9 +15,14 @@ from app.services import firestore_service
 
 log = structlog.get_logger(__name__)
 
-_INITIAL_AMBIGUITY_CAP = 3
-_MAX_CLARIFICATION_ROUNDS = 3
-_ROUND_CAP = {1: 2, 2: 1}
+# --- TEMP (testing): unlimited clarification loop ---
+# Raised so nothing is force-finished or trimmed; the loop now runs until the
+# validator + completeness agents produce zero ambiguities. The 9999 ceiling
+# is only a safety net against a true infinite loop / runaway API spend.
+# To restore the tiered cap, revert to: 3 / 3 / {1: 2, 2: 1}
+_INITIAL_AMBIGUITY_CAP = 9999
+_MAX_CLARIFICATION_ROUNDS = 9999
+_ROUND_CAP: dict[int, int] = {}
 
 
 # ---------- Topic dedup helpers ----------
@@ -235,6 +240,68 @@ def apply_clarification_in_background(
         args=(uid, project_id, ambiguity_id, question, answer),
         daemon=True,
     ).start()
+
+
+def _run_apply_clarifications_batch(uid: str, project_id: str, answers: list[dict]) -> None:
+    """Apply a whole batch of answers, refine once, then advance the project.
+    answers: [{"ambiguity_id": str, "answer": str}, ...]"""
+    try:
+        current = firestore_service.get_latest_structured_requirements(uid, project_id)
+        if current is None:
+            log.error("pipeline.batch.no_sr", uid=uid, project_id=project_id)
+            return
+
+        firestore_service.increment_clarification_round(uid, project_id)  # bookkeeping only
+
+        flags_by_id = {a.id: a for a in current.ambiguities}
+        try:
+            resolved_topics = firestore_service.get_resolved_topics(uid, project_id)
+        except Exception:
+            resolved_topics = []
+        for ans in answers:
+            flag = flags_by_id.get(ans["ambiguity_id"])
+            if flag:
+                canonical = _canonical_topic(flag.field_path)
+                try:
+                    firestore_service.add_resolved_topic(uid, project_id, canonical)
+                except Exception:
+                    pass
+                if canonical not in resolved_topics:
+                    resolved_topics.append(canonical)
+
+        coordinator = RequirementsCoordinator()
+        updated = coordinator.apply_clarifications_batch(
+            current, answers, resolved_topics=resolved_topics
+        )
+
+        firestore_service.add_structured_requirements(uid, project_id, updated)
+
+        # Record each turn WITH its suggested options so the summary/edit screens
+        # can show what was asked and offered.
+        for ans in answers:
+            flag = flags_by_id.get(ans["ambiguity_id"])
+            firestore_service.add_clarification_turn(
+                uid, project_id, ans["ambiguity_id"],
+                flag.reason if flag else "",
+                ans["answer"],
+                suggested_options=(flag.suggested_options if flag else []),
+                field_path=(flag.field_path if flag else None),
+            )
+
+        next_status = (
+            ProjectStatus.awaiting_approval if not updated.ambiguities
+            else ProjectStatus.clarifying
+        )
+        firestore_service.set_project_status(uid, project_id, next_status)
+        if not updated.ambiguities:
+            log.info("clarifications.complete", uid=uid, project_id=project_id)
+            _generate_and_store_summary_blueprint(uid, project_id)
+    except Exception as exc:
+        log.error("pipeline.batch.error", uid=uid, project_id=project_id, error=str(exc))
+        try:
+            firestore_service.update_project(uid, project_id, {"last_error": str(exc)})
+        except Exception:
+            pass
 
 
 # ---------- Revision ----------

@@ -180,6 +180,8 @@ def add_clarification_turn(
     ambiguity_id: str,
     question: str,
     answer: str,
+    suggested_options: list | None = None,
+    field_path: str | None = None,
 ) -> str:
     """Record a clarification Q&A turn and return its turn id."""
     turn_id = uuid.uuid4().hex[:12]
@@ -188,6 +190,8 @@ def add_clarification_turn(
             "ambiguity_id": ambiguity_id,
             "question": question,
             "answer": answer,
+            "suggested_options": suggested_options or [],
+            "field_path": field_path,
             "timestamp": datetime.now(timezone.utc),
         }
     )

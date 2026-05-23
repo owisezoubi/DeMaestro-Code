@@ -91,6 +91,28 @@ class RequirementsCoordinator:
         )
         return updated
 
+    def apply_clarifications_batch(
+        self,
+        current: StructuredRequirements,
+        answers: list[dict],
+        resolved_topics: list[str] | None = None,
+    ) -> StructuredRequirements:
+        self.log.info("coordinator.apply_clarifications_batch.start", count=len(answers))
+        updated = self.clarification.apply_answers(current, answers)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fv = ex.submit(self.validator.validate, updated)
+            fc = ex.submit(self.completeness.validate, updated)
+            updated = fv.result(timeout=120)
+            updated = fc.result(timeout=120)
+        if resolved_topics:
+            filtered = [a for a in updated.ambiguities
+                        if not _is_resolved_topic(a.field_path, resolved_topics)]
+            if len(filtered) < len(updated.ambiguities):
+                updated = updated.model_copy(update={"ambiguities": filtered})
+        self.log.info("coordinator.apply_clarifications_batch.done",
+                      remaining=len(updated.ambiguities))
+        return updated
+
     def next_question(self, sr: StructuredRequirements) -> Optional[AmbiguityFlag]:
         return self.clarification.select_next_question(sr)
 

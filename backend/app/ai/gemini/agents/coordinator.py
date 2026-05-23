@@ -14,6 +14,25 @@ from app.ai.gemini.agents.validator import ValidatorAgent
 from app.models.structured_requirements import AmbiguityFlag, StructuredRequirements
 
 
+_REQ_ID_RE = re.compile(r'\b(?:UR|FR|NFR|AMB|REQ|US)[-\s]?\d+\b', re.IGNORECASE)
+
+
+def _humanize_reason(text: str) -> str:
+    if not text:
+        return text
+    t = _REQ_ID_RE.sub('this requirement', text)
+    t = re.sub(r'\bthis requirement and this requirement\b', 'these requirements', t, flags=re.IGNORECASE)
+    t = re.sub(r'\s{2,}', ' ', t).strip()
+    return t
+
+
+def _sanitize_ambiguities(sr: StructuredRequirements) -> StructuredRequirements:
+    if not getattr(sr, 'ambiguities', None):
+        return sr
+    cleaned = [a.model_copy(update={"reason": _humanize_reason(a.reason)}) for a in sr.ambiguities]
+    return sr.model_copy(update={"ambiguities": cleaned})
+
+
 def _is_resolved_topic(field_path: str, resolved_topics: list[str]) -> bool:
     """Return True if field_path is covered by a previously resolved topic.
 
@@ -46,6 +65,7 @@ class RequirementsCoordinator:
         sr = self.analyst.analyze(raw_input)
         sr = self.validator.validate(sr)
         sr = self.completeness.validate(sr)
+        sr = _sanitize_ambiguities(sr)
         self.log.info(
             "coordinator.analyze.done",
             num_requirements=len(sr.user_requirements),
@@ -84,6 +104,7 @@ class RequirementsCoordinator:
                 )
                 updated = updated.model_copy(update={"ambiguities": filtered})
 
+        updated = _sanitize_ambiguities(updated)
         self.log.info(
             "coordinator.apply_clarification.done",
             new_version=updated.version,
@@ -109,6 +130,7 @@ class RequirementsCoordinator:
                         if not _is_resolved_topic(a.field_path, resolved_topics)]
             if len(filtered) < len(updated.ambiguities):
                 updated = updated.model_copy(update={"ambiguities": filtered})
+        updated = _sanitize_ambiguities(updated)
         self.log.info("coordinator.apply_clarifications_batch.done",
                       remaining=len(updated.ambiguities))
         return updated

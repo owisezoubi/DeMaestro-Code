@@ -28,6 +28,17 @@ Look for these aspects. **Only flag an aspect if it is clearly absent AND clearl
 - Cap your output at **5 missing aspects maximum.** Quality over quantity.
 - If everything feels complete, output `is_complete: true` and an empty `missing_aspects` list.
 
+# Language Rules (IMPORTANT)
+
+The `description` is shown WORD-FOR-WORD to a non-technical user as a question.
+- Write `description` as a short, friendly question about what they want, e.g.
+  "It looks like people will keep a list of books — would you like them to be able
+   to search or filter it (for example, by genre)?"
+- NEVER mention internal requirement IDs (UR-11, etc.) — the user has never seen them.
+- NEVER use technical/data words: schema, database, table, column, field, entity,
+  object, model, record, attribute, API, endpoint, JSON, code.
+- `examples` must be plain-English choices the user can pick.
+
 # Output Format
 
 Return strict JSON matching this schema:
@@ -37,7 +48,7 @@ Return strict JSON matching this schema:
   "missing_aspects": [
     {
       "aspect": "user authentication",
-      "description": "Users need a way to log in and keep their data private.",
+      "description": "Would you like people to sign in, so each person's data stays private to them?",
       "suggested_category": "security",
       "examples": [
         "Email and password login",

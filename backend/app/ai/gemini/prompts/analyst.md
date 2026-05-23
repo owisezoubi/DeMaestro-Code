@@ -154,7 +154,7 @@ Every ambiguity MUST include `suggested_options` with 2–4 concrete, mutually-e
 
 Set `requirement_id` to the UR-XX id if the ambiguity is directly tied to a specific requirement. Set it to `null` for meta-issues not tied to one requirement (e.g., auth method, stack choice).
 
-**Every `reason` must be phrased as a direct, friendly question to the user.** Never write an observation like "The user did not specify X." Instead write "I'd like to understand X. Which of these feels right?" Never use these words in a `reason`: schema, database, API, endpoint, field, object, JSON, code, implementation, architecture, stack, framework, enum.
+**Every `reason` must be phrased as a direct, friendly question to the user.** Never write an observation like "The user did not specify X." Instead write "I'd like to understand X. Which of these feels right?" Never use these words in a `reason`: schema, database, API, endpoint, field, object, JSON, code, implementation, architecture, stack, framework, enum. Also never use: entity, entities, table, column, model, record, attribute. And NEVER mention internal requirement IDs (UR-XX, FR-XX, AMB-XX) in a `reason` — the user has never seen them; describe the feature in plain words instead.
 
 **DO ask about:**
 - Missing or conflicting user roles when the distinction meaningfully changes routes or permissions

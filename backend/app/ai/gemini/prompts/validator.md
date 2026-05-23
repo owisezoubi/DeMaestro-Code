@@ -50,11 +50,23 @@ Your output must conform exactly to this schema:
 
 # Language Rules for Issue Descriptions
 
-Write every `description` as a conversational, friendly clarification request directed at the user — not a technical observation. Use this pattern: **"I want to make sure I understand [X] correctly. Can you clarify…"**
+The `description` is shown WORD-FOR-WORD to a non-technical end user as a question.
+Write it as a short, friendly, plain-English question about what the user wants —
+never a technical observation or spec review.
 
-Never use these words in a `description`: schema, database, API, endpoint, field, object, JSON, code, implementation, architecture, stack, framework, enum.
+Hard rules for `description`:
+- NEVER mention internal requirement IDs (UR-11, FR-3, AMB-02, etc.). The user has
+  never seen these. Refer to the feature in plain words ("your reading list",
+  "signing in") instead.
+- NEVER use technical/data-modelling words: schema, database, table, column, field,
+  entity, object, model, record, attribute, API, endpoint, JSON, code,
+  implementation, architecture, stack, framework, enum.
+- Phrase as a question the user can answer, e.g. "I want to make sure I understand
+  how you'd like X to work. Can you tell me…?"
+- Keep it to 1–2 short sentences.
 
-The `suggested_fix` may use plain technical shorthand (it is for internal use), but prefer plain English there too when possible.
+IDs belong only in the `requirement_id` field (internal). `suggested_fix` is also
+internal. ONLY `description` is user-facing.
 
 # Examples
 
@@ -64,7 +76,7 @@ The `suggested_fix` may use plain technical shorthand (it is for internal use), 
   "requirement_id": "set",
   "fundamental": "consistency",
   "severity": "error",
-  "description": "I want to make sure I understand UR-03 and UR-07 correctly. Can you clarify whether all users should be able to see each other's recipes, or only their own? Both can't be true at the same time.",
+  "description": "I want to make sure I understand how recipes are shared. Should everyone be able to see each other's recipes, or should each person only see their own?",
   "suggested_fix": "Decide whether the app has a shared recipe feed or per-user private collections."
 }
 ```
@@ -75,7 +87,7 @@ The `suggested_fix` may use plain technical shorthand (it is for internal use), 
   "requirement_id": "UR-05",
   "fundamental": "unambiguity",
   "severity": "error",
-  "description": "I want to make sure I understand what 'promptly' means in UR-05. Can you give me a sense of how fast the system should respond? Without a specific time in mind, this is hard to build to.",
+  "description": "I want to make sure I understand how fast the app should feel. Roughly how quickly should things respond after someone taps or clicks?",
   "suggested_fix": "Replace with a concrete bound, e.g., 'the system responds within 2 seconds for all user actions.'"
 }
 ```
@@ -102,6 +114,18 @@ The `suggested_fix` may use plain technical shorthand (it is for internal use), 
 }
 ```
 *Why it's bad: reads like a technical spec review, not a friendly question to the user. Rephrase as "I want to make sure I understand… Can you clarify…"*
+
+## Bad: Do NOT produce this (leaks an internal ID and data-model jargon)
+```json
+{
+  "requirement_id": "UR-11",
+  "fundamental": "unambiguity",
+  "severity": "warning",
+  "description": "I want to make sure I understand UR-11 correctly. Can you clarify how users will filter their reading list by genre if the Book entity doesn't have a genre field?",
+  "suggested_fix": "Add a genre attribute to the Book entity."
+}
+```
+*Why it's bad: "UR-11", "Book entity", and "genre field" are meaningless/confusing to the user. Instead: "I'd like to understand how people will browse their reading list. Should they be able to filter books by genre?"*
 
 ---
 

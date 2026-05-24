@@ -245,7 +245,6 @@ async def revise_requirements(project_id: str, payload: ReviseRequest, user: Cur
         "blueprint": None,
         "approved_at": None,
         "clarification_round": 0,
-        "resolved_topics": [],
         "last_error": None,
         "user_added_requirements": merged_added,
     })

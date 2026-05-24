@@ -47,7 +47,7 @@ class Entity(BaseModel):
 
 class AmbiguityFlag(BaseModel):
     id: str
-    field_path: str
+    field_path: str = ""
     reason: str
     suggested_options: list[str] = []
     requirement_id: Optional[str] = None

@@ -36,7 +36,7 @@ export default function Signup() {
       <ThemeToggle className="absolute top-4 right-4" />
       <div className="w-full max-w-sm">
         <div className="flex justify-center mb-8">
-          <Logo />
+          <Logo linked={false} imgClassName="h-24 w-auto" />
         </div>
         <div className="card">
           <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-1">

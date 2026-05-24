@@ -9,6 +9,7 @@ from app.ai.gemini.agents.analyst import AnalystAgent
 from app.ai.gemini.agents.blueprint import BlueprintAgent, BlueprintResponse
 from app.ai.gemini.agents.clarification import ClarificationAgent
 from app.ai.gemini.agents.completeness import CompletenessAgent
+from app.ai.gemini.agents.revision import RevisionAgent
 from app.ai.gemini.agents.summary import SummaryAgent
 from app.ai.gemini.agents.validator import ValidatorAgent
 from app.models.structured_requirements import AmbiguityFlag, StructuredRequirements
@@ -56,6 +57,7 @@ class RequirementsCoordinator:
         self.validator = ValidatorAgent()
         self.completeness = CompletenessAgent()
         self.clarification = ClarificationAgent()
+        self.revision = RevisionAgent()
         self.summary = SummaryAgent()
         self.blueprint = BlueprintAgent()
         self.log = structlog.get_logger("RequirementsCoordinator")
@@ -133,6 +135,24 @@ class RequirementsCoordinator:
         updated = _sanitize_ambiguities(updated)
         self.log.info("coordinator.apply_clarifications_batch.done",
                       remaining=len(updated.ambiguities))
+        return updated
+
+    def revise(
+        self,
+        current: StructuredRequirements,
+        edited_answers: list[dict],
+        new_requirements: list[str],
+        resolved_topics: list[str] | None = None,
+    ) -> StructuredRequirements:
+        self.log.info("coordinator.revise.start", new_count=len(new_requirements))
+        updated = self.revision.integrate(current, new_requirements, edited_answers)
+        if resolved_topics:
+            updated = updated.model_copy(update={
+                "ambiguities": [a for a in updated.ambiguities
+                                if not _is_resolved_topic(a.field_path, resolved_topics)],
+            })
+        updated = _sanitize_ambiguities(updated)
+        self.log.info("coordinator.revise.done", remaining=len(updated.ambiguities))
         return updated
 
     def next_question(self, sr: StructuredRequirements) -> Optional[AmbiguityFlag]:

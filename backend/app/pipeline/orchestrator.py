@@ -307,54 +307,33 @@ def _run_apply_clarifications_batch(uid: str, project_id: str, answers: list[dic
 # ---------- Revision ----------
 
 def _run_revision(uid: str, project_id: str, answers: list[dict], new_requirements: list[str]) -> None:
-    """Re-analyze original requirements + edited answers + new requirements."""
+    """Incrementally integrate edited answers + new requirements into the approved SR.
+    Only conflict/new-requirement questions are raised — no full re-analysis."""
     try:
-        latest = firestore_service.get_latest_structured_requirements(uid, project_id)
-        base_version = latest.version if latest else 0
-
-        raw_inputs = firestore_service.list_raw_inputs(uid, project_id)
-        parts = []
-        for ri in raw_inputs:
-            if ri.type == RawInputType.text and ri.content:
-                parts.append(ri.content)
-            elif ri.type == RawInputType.pdf and ri.extracted_text:
-                parts.append(ri.extracted_text)
-        combined = "\n\n".join(parts)
-
-        qa_lines = []
-        for a in answers:
-            q = (a.get("question") or "").strip()
-            ans = (a.get("answer") or "").strip()
-            if not ans:
-                continue
-            qa_lines.append(f"- Q: {q}\n  A: {ans}" if q else f"- {ans}")
-
-        new_lines = [f"- {r.strip()}" for r in new_requirements if r and r.strip()]
-
-        aug = combined
-        if qa_lines:
-            aug += ("\n\n## Clarifications already resolved (treat as authoritative)\n"
-                    + "\n".join(qa_lines))
-        if new_lines:
-            aug += "\n\n## Additional requirements from the user\n" + "\n".join(new_lines)
-
-        if not aug.strip():
+        current = firestore_service.get_latest_structured_requirements(uid, project_id)
+        if current is None:
             firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
             return
+        base_version = current.version
+        try:
+            resolved_topics = firestore_service.get_resolved_topics(uid, project_id)
+        except Exception:
+            resolved_topics = []
 
         coordinator = RequirementsCoordinator()
-        sr = coordinator.analyze(aug)
-        # bump version so we never overwrite an existing version doc (v{n})
-        sr = sr.model_copy(update={"version": base_version + 1})
+        updated = coordinator.revise(
+            current,
+            edited_answers=answers,
+            new_requirements=new_requirements,
+            resolved_topics=resolved_topics,
+        )
+        updated = updated.model_copy(update={"version": base_version + 1})
 
-        if len(sr.ambiguities) > _INITIAL_AMBIGUITY_CAP:
-            sr = sr.model_copy(update={"ambiguities": sr.ambiguities[:_INITIAL_AMBIGUITY_CAP]})
-
-        firestore_service.add_structured_requirements(uid, project_id, sr)
-        next_status = (ProjectStatus.awaiting_approval if not sr.ambiguities
+        firestore_service.add_structured_requirements(uid, project_id, updated)
+        next_status = (ProjectStatus.awaiting_approval if not updated.ambiguities
                        else ProjectStatus.clarifying)
         firestore_service.set_project_status(uid, project_id, next_status)
-        if not sr.ambiguities:
+        if not updated.ambiguities:
             _generate_and_store_summary_blueprint(uid, project_id)
     except Exception as exc:
         log.error("pipeline.revision.error", uid=uid, project_id=project_id, error=str(exc))

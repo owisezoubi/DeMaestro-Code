@@ -19,11 +19,15 @@ answered.
    acceptance_criteria, priority, and category; self-evaluate atomicity, unambiguity,
    and verifiability (set consistency to "not_evaluated"). Add a new entity or field
    only if a new requirement clearly needs one.
-4. CONFLICT CHECK — the ONLY source of new questions. Compare each NEW requirement
-   against the EXISTING requirements and raise an ambiguity ONLY when:
-   (a) a new requirement contradicts an existing requirement (a consistency conflict), or
-   (b) a new requirement is itself genuinely ambiguous/unverifiable and you cannot
-       safely resolve it yourself.
+4. CONFLICT CHECK — compare each NEW requirement against (a) every EXISTING
+   requirement and (b) every decision already captured in the EDITED answers /
+   settled clarifications. Raise an ambiguity whenever a new requirement could
+   contradict any of them — even subtly. Example: if an existing decision says
+   "any signed-in user can delete a book" and the user adds "only admins can delete
+   books", these conflict — you MUST raise a question asking which rule wins, rather
+   than silently overwriting. Also raise an ambiguity if a new requirement is itself
+   genuinely ambiguous or unverifiable. When unsure whether something conflicts,
+   ask.
 
 # Hard rules
 - Do NOT raise ambiguities about existing requirements, missing features, design/UI,

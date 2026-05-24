@@ -128,6 +128,35 @@ class GeneratorAgent:
 - Follow the tech stack: {plan.technology_stack}
 - Reference generated dependencies correctly
 - Code must be production-ready
+- BACKEND: you may import the pinned core packages (fastapi, uvicorn, sqlalchemy,
+  pydantic, pydantic-settings, python-dotenv, python-jose, passlib, psycopg2-binary,
+  python-multipart, alembic) AND any package the architect declared in
+  extra_dependencies: {plan.extra_dependencies}. Do not import packages outside the
+  union of those two lists. Standard library is always fine.
+- FRONTEND: import only packages in the core package.json (react, react-dom,
+  react-router-dom, @tanstack/react-query, axios, tailwind, the provided shadcn/ui
+  components, lucide-react) PLUS any package the architect declared in
+  extra_frontend_dependencies: {plan.extra_frontend_dependencies}. Do not import npm
+  packages outside the union of those two lists.
+
+**File-specific requirements (follow whichever applies to {file_to_gen.path}):**
+- backend/app/database.py: at the top do `from dotenv import load_dotenv; load_dotenv()`;
+  read `DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")`; if it starts
+  with "sqlite", create the engine with connect_args={{"check_same_thread": False}};
+  define Base = declarative_base(), SessionLocal, a get_db() generator, and
+  create_tables() calling Base.metadata.create_all(bind=engine). SYNC SQLAlchemy only.
+- model files: `from app.database import Base` (do NOT create a new declarative_base);
+  use only portable column types (Integer, String, Text, Boolean, DateTime, Float,
+  ForeignKey) — no JSONB/ARRAY/server-side UUID defaults.
+- backend/app/seed.py: expose seed_demo_data() that inserts several demo rows per
+  entity ONLY when its table is empty (idempotent); if auth exists, seed a demo user
+  demo@example.com / demo1234 (hashed).
+- backend/app/main.py: import all models, then on startup call create_tables() then
+  seed_demo_data(); configure CORS from os.getenv("CORS_ORIGINS",
+  "http://localhost:5173").
+- any frontend file that calls the API: use
+  `const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"` and
+  prefix every request with `${{API}}`. Never hardcode a backend URL.
 
 Output ONLY the file code. No markdown, no wrapper, no explanations."""
 
@@ -140,7 +169,11 @@ Output ONLY the file code. No markdown, no wrapper, no explanations."""
         if ext in ("py",):
             return f'"""Mock generated: {file_to_gen.path}\n{file_to_gen.description}\n"""\n'
         if ext in ("jsx", "tsx", "js", "ts"):
-            return f"// Mock generated: {file_to_gen.path}\n// {file_to_gen.description}\nexport default function Mock() {{ return null; }}\n"
+            return (
+                f"// Mock generated: {file_to_gen.path}\n"
+                f"// {file_to_gen.description}\n"
+                "export default function Mock() { return null; }\n"
+            )
         return f"# Mock generated: {file_to_gen.path}\n# {file_to_gen.description}\n"
 
     def _load_templates(self) -> dict[str, str]:
@@ -157,7 +190,8 @@ export default function PageName() {
   const { data: items, isLoading } = useQuery({
     queryKey: ["items"],
     queryFn: async () => {
-      const res = await fetch("/api/items");
+      const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+      const res = await fetch(`${API}/api/items`);
       return res.json();
     },
   });
@@ -210,11 +244,9 @@ def create_item(item: ModelSchema, db: Session = Depends(get_db)):
     return db_item
 """,
             "db_schema": """
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
-
-Base = declarative_base()
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
+from app.database import Base
 
 class User(Base):
     __tablename__ = "users"

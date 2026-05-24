@@ -31,6 +31,16 @@ class ValidatorResponse(BaseModel):
     is_complete: bool = True  # Gemini may include this; we accept but don't require it
 
 
+class ConsistencyConflict(BaseModel):
+    requirement_id: str            # the new requirement involved, or "set"
+    question: str                  # friendly plain-English question to resolve it
+    options: list[str] = []        # 2 ways to resolve
+
+
+class ConsistencyResponse(BaseModel):
+    conflicts: list[ConsistencyConflict]
+
+
 class ValidatorAgent(GeminiAgent):
     agent_name = "ValidatorAgent"
     prompt_name = "validator"
@@ -221,6 +231,49 @@ class ValidatorAgent(GeminiAgent):
 
         data = json.loads(raw)  # raises JSONDecodeError if still malformed
         return ValidatorResponse(**data)
+
+    def consistency_conflicts(self, sr: StructuredRequirements, focus_requirement_ids) -> list[AmbiguityFlag]:
+        """Return ONLY direct contradictions, focused on the newly-added requirements.
+        Used by the revise flow so a new requirement that conflicts with an existing
+        one (or a settled decision) raises a clarification."""
+        if self.is_mock() or not focus_requirement_ids:
+            return []
+        focus = list(focus_requirement_ids)
+        system_prompt = (
+            "You are checking software requirements for DIRECT CONTRADICTIONS — two "
+            "requirements that cannot both be true at the same time. Focus especially "
+            f"on contradictions that involve these newly added requirements: {focus}. "
+            "A contradiction includes a new requirement that conflicts with a decision "
+            "already made elsewhere in the set. For each real contradiction, write a "
+            "short, friendly, plain-English question the user must answer to resolve it "
+            "(NO requirement IDs, NO technical jargon) and exactly 2 options describing "
+            "the two ways to resolve it. If there are no contradictions, return an "
+            "empty list."
+        )
+        try:
+            resp = self._call_gemini(
+                system_prompt=system_prompt,
+                user_content=sr.model_dump_json(indent=2),
+                response_model=ConsistencyResponse,
+                stage="consistency_check",
+            )
+        except Exception as exc:
+            self.log.warning("validator.consistency_check.failed", error=str(exc))
+            return []
+
+        id_to_idx = {r.id: i for i, r in enumerate(sr.user_requirements)}
+        flags = []
+        for i, c in enumerate(resp.conflicts):
+            idx = id_to_idx.get(c.requirement_id)
+            field_path = f"user_requirements[{idx}].statement" if idx is not None else "set"
+            flags.append(AmbiguityFlag(
+                id=f"AMB-CONFLICT-{i + 1}",
+                field_path=field_path,
+                reason=c.question,
+                suggested_options=c.options or ["Keep the original requirement", "Use the new requirement"],
+                requirement_id=c.requirement_id if idx is not None else None,
+            ))
+        return flags
 
     def process(self, sr: StructuredRequirements) -> StructuredRequirements:
         return self.validate(sr)

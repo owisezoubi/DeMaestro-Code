@@ -47,4 +47,4 @@ npm run dev
 
 ## Configuration
 
-Edit `.env` at the project root. The defaults work for local Docker Compose; for manual setup, you'll need to point `DATABASE_URL` at a running Postgres instance (or use Docker for just the database: `docker compose up db`).
+By default the app uses a local SQLite file (backend/app.db) — no database setup is required, so `bash start.sh` works on any machine. To use PostgreSQL instead, run `docker compose up --build` (Docker provides Postgres automatically) or set DATABASE_URL to your own postgresql:// URL.

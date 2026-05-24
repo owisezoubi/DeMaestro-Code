@@ -59,7 +59,64 @@ class ArchitectAgent:
 {json.dumps(context['blueprint'], indent=2)}
 
 **Your Task:**
-Design a complete file structure and generation order for this application. Use the default stack: React 18 + FastAPI + PostgreSQL.
+Design a complete file structure and generation order for this application.
+
+Use this stack: React 18 (Vite) frontend + FastAPI backend.
+
+DATABASE — the generated app MUST run with zero setup on any machine:
+- The generated `database.py` must read DATABASE_URL from the environment and
+  DEFAULT to "sqlite:///./app.db" when it is unset.
+- When the URL starts with "sqlite", create the engine with
+  connect_args={{"check_same_thread": False}}.
+- Use SYNCHRONOUS SQLAlchemy only: create_engine, sessionmaker, a get_db()
+  dependency, and a create_tables() that calls Base.metadata.create_all(bind=engine).
+  Do NOT use async engines or async drivers (no create_async_engine, asyncpg,
+  aiosqlite).
+- Use ONLY portable column types (Integer, String, Text, Boolean, DateTime, Float,
+  ForeignKey). Do NOT use PostgreSQL-only types (JSONB, ARRAY, server-side UUID
+  defaults) so the same models work on both SQLite and Postgres.
+- main.py must import the models before calling create_tables().
+- `database.py` must load a local .env at import time BEFORE reading env vars:
+  `from dotenv import load_dotenv; load_dotenv()` (python-dotenv is installed), so a
+  user-supplied DATABASE_URL in .env is honored.
+- Define `Base = declarative_base()` in database.py. EVERY model file must
+  `from app.database import Base` (one shared Base) — never call declarative_base()
+  again — so create_tables() actually creates all tables.
+
+DEMO / SEED DATA (the app must never open empty):
+- Include `backend/app/seed.py` exposing `seed_demo_data()` that inserts several
+  realistic demo rows for EVERY entity (with valid foreign keys linking them),
+  but ONLY when a table is empty (idempotent: check count() == 0 first).
+- If the app has authentication, also seed one demo user — email
+  "demo@example.com", password "demo1234" (properly hashed) — so the user can log
+  in and see data.
+- main.py must call seed_demo_data() once on startup, AFTER create_tables().
+
+DEPLOYMENT-READY CONFIG (keep config env-driven; do NOT add deploy files):
+- Backend: read DATABASE_URL, CORS_ORIGINS (comma-separated), and the port from the
+  environment — bind host 0.0.0.0, port int(os.getenv("PORT", "8000")). Never
+  hardcode localhost in backend code.
+- Frontend: the API base URL must come from import.meta.env.VITE_API_BASE_URL
+  (default "http://localhost:8000"); never hardcode a backend URL in components.
+- Keep psycopg2-binary available so production can switch to managed Postgres just by
+  setting DATABASE_URL. Do NOT create vercel.json, render.yaml, or Procfile.
+
+DEPENDENCIES — a pinned, known-good CORE requirements.txt is already provided
+(fastapi, uvicorn, sqlalchemy, pydantic, pydantic-settings, python-dotenv,
+python-jose, passlib, psycopg2-binary, python-multipart, alembic). You do NOT rewrite
+requirements.txt. If the app needs ADDITIONAL Python packages (e.g. "apscheduler" for
+scheduling, "pillow" for images), list them in the plan field `extra_dependencies` as
+plain PyPI names WITHOUT version numbers (e.g. ["apscheduler", "pillow"]). They will
+be appended to requirements.txt automatically. Keep the list minimal, use only
+well-known PyPI packages, and never list a package that's already in the core.
+
+FRONTEND PACKAGES — a pinned core package.json is already provided (React, Vite,
+React Router, TanStack Query, axios, Tailwind, shadcn/ui components, lucide-react).
+You do NOT rewrite package.json. If the frontend needs ADDITIONAL npm packages (e.g.
+"recharts" for charts, "date-fns" for dates), list them in `extra_frontend_dependencies`
+as plain npm names WITHOUT versions (scoped names like "@fullcalendar/react" are fine).
+They will be merged into package.json automatically. Keep the list minimal; never list
+a package already in the core.
 
 Output a JSON GenerationPlan with:
 1. technology_stack: "python-postgres"
@@ -70,9 +127,15 @@ Output a JSON GenerationPlan with:
    - template: one of ["react_page", "react_component", "fastapi_route", "db_schema", "service", "none"]
 3. generation_order: ordered list of file paths to generate (respect dependencies)
 4. notes: key architecture decisions and constraints
+5. extra_dependencies: array of extra PyPI package names the app needs beyond the core
+   (names only, no versions); [] if none.
+6. extra_frontend_dependencies: array of extra npm package names beyond the core
+   (names only, no versions); [] if none.
 
 **Rules:**
-- Start with database schema (models.py, create_tables.sql)
+- Start with the database: models.py defining a table for EVERY entity (all using
+  the shared Base from app.database), then seed.py (demo data).
+- Include backend/app/seed.py in both `files` and `generation_order`.
 - Then FastAPI app setup and auth routes
 - Then data routes (CRUD endpoints for each entity)
 - Then React pages (login, dashboard, entity pages, forms)
@@ -96,7 +159,8 @@ anything you generate. Including them wastes tokens and causes generation failur
 - frontend/src/main.jsx
 - frontend/src/index.css
 - frontend/src/lib/utils.js
-- frontend/src/components/ui/*.jsx  (button, card, input, label, textarea, badge, alert, avatar, separator, scroll-area, skeleton, tooltip)
+- frontend/src/components/ui/*.jsx  (button, card, input, label, textarea, badge, alert,
+  avatar, separator, scroll-area, skeleton, tooltip)
 - docker-compose.yml
 - .env.example
 - SETUP.md
@@ -146,6 +210,12 @@ Output ONLY valid JSON, no markdown wrapper."""
                 template="none",
             ),
             FileToGenerate(
+                path="backend/app/seed.py",
+                description="Idempotent demo-data seeding for all tables.",
+                depends_on=["backend/app/models.py", "backend/app/database.py"],
+                template="none",
+            ),
+            FileToGenerate(
                 path="frontend/src/pages/Login.jsx",
                 description="Login page with email/password form.",
                 depends_on=[],
@@ -162,5 +232,5 @@ Output ONLY valid JSON, no markdown wrapper."""
             technology_stack="python-postgres",
             files=files,
             generation_order=[f.path for f in files],
-            notes=f"Mock plan for {sr.app_name}. Stack: React 18 + FastAPI + PostgreSQL.",
+            notes=f"Mock plan for {sr.app_name}. Stack: React 18 + FastAPI + SQLite (Postgres-ready).",
         )

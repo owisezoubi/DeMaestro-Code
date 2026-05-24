@@ -9,6 +9,7 @@ Best-effort packaging: if tests fail after all debug cycles, the pipeline
 still packages the ZIP and sets status to ready_with_warnings so the user
 can inspect and fix the code themselves.
 """
+import json
 import structlog
 
 from app.ai.claude.agents.architect import ArchitectAgent
@@ -67,6 +68,39 @@ class GenerationOrchestrator:
             scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
             generated_files: dict[str, str] = dict(scaffolding)
             log.info("generation.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
+
+            extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
+            if extras:
+                req_path = "backend/requirements.txt"
+                base_req = generated_files.get(req_path, "")
+                present = base_req.lower()
+                to_add = [
+                    d for d in extras
+                    if d.split("==")[0].split(">")[0].split("<")[0].strip().lower() not in present
+                ]
+                if to_add:
+                    generated_files[req_path] = (
+                        base_req.rstrip()
+                        + "\n# --- app-specific dependencies (declared by the architect) ---\n"
+                        + "\n".join(to_add) + "\n"
+                    )
+                    log.info("pipeline.extra_deps_added", project_id=project_id, deps=to_add)
+
+            fe_extras = [d.strip() for d in (plan.extra_frontend_dependencies or []) if d and d.strip()]
+            if fe_extras:
+                pkg_path = "frontend/package.json"
+                pkg_raw = generated_files.get(pkg_path, "")
+                try:
+                    pkg = json.loads(pkg_raw)
+                    deps = pkg.setdefault("dependencies", {})
+                    added = [name for name in fe_extras if name not in deps]
+                    for name in added:
+                        deps[name] = "latest"
+                    if added:
+                        generated_files[pkg_path] = json.dumps(pkg, indent=2) + "\n"
+                        log.info("pipeline.extra_frontend_deps_added", project_id=project_id, deps=added)
+                except Exception as exc:
+                    log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
 
             for file_path in plan.generation_order:
                 file_to_gen = next((f for f in plan.files if f.path == file_path), None)
@@ -139,6 +173,39 @@ class GenerationOrchestrator:
             scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
             generated_files: dict[str, str] = dict(scaffolding)
             log.info("pipeline.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
+
+            extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
+            if extras:
+                req_path = "backend/requirements.txt"
+                base_req = generated_files.get(req_path, "")
+                present = base_req.lower()
+                to_add = [
+                    d for d in extras
+                    if d.split("==")[0].split(">")[0].split("<")[0].strip().lower() not in present
+                ]
+                if to_add:
+                    generated_files[req_path] = (
+                        base_req.rstrip()
+                        + "\n# --- app-specific dependencies (declared by the architect) ---\n"
+                        + "\n".join(to_add) + "\n"
+                    )
+                    log.info("pipeline.extra_deps_added", project_id=project_id, deps=to_add)
+
+            fe_extras = [d.strip() for d in (plan.extra_frontend_dependencies or []) if d and d.strip()]
+            if fe_extras:
+                pkg_path = "frontend/package.json"
+                pkg_raw = generated_files.get(pkg_path, "")
+                try:
+                    pkg = json.loads(pkg_raw)
+                    deps = pkg.setdefault("dependencies", {})
+                    added = [name for name in fe_extras if name not in deps]
+                    for name in added:
+                        deps[name] = "latest"
+                    if added:
+                        generated_files[pkg_path] = json.dumps(pkg, indent=2) + "\n"
+                        log.info("pipeline.extra_frontend_deps_added", project_id=project_id, deps=added)
+                except Exception as exc:
+                    log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
 
             app_files = [f for f in plan.files if f.path not in scaffolding]
             total = len(scaffolding) + len(app_files)

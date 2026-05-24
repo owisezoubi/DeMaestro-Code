@@ -217,7 +217,10 @@ class BlueprintAgent(GeminiAgent):
                     key_components=["WorkoutTable", "SearchBar", "FilterPanel"],
                 ),
             ],
-            technology_stack_notes="React + Vite frontend, FastAPI backend, PostgreSQL database",
+            technology_stack_notes=(
+                "React + Vite frontend, FastAPI backend, "
+                "SQLite database by default (Postgres via DATABASE_URL)"
+            ),
         )
 
     def process(self, sr: StructuredRequirements) -> BlueprintResponse:

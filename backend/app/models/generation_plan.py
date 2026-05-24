@@ -40,6 +40,8 @@ class GenerationPlan(BaseModel):
     files: list[FileToGenerate]
     generation_order: list[str]
     notes: str
+    extra_dependencies: list[str] = []
+    extra_frontend_dependencies: list[str] = []
 
     @field_validator("technology_stack", "notes", mode="before")
     @classmethod

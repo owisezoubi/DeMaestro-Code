@@ -146,11 +146,26 @@ class RequirementsCoordinator:
     ) -> StructuredRequirements:
         self.log.info("coordinator.revise.start", new_count=len(new_requirements))
         updated = self.revision.integrate(current, new_requirements, edited_answers)
+
+        # Dedup the revision agent's own ambiguities against already-resolved topics.
         if resolved_topics:
             updated = updated.model_copy(update={
                 "ambiguities": [a for a in updated.ambiguities
                                 if not _is_resolved_topic(a.field_path, resolved_topics)],
             })
+
+        # Deterministic contradiction net, focused on the NEW requirements. NOT
+        # filtered by resolved_topics — a new requirement may legitimately re-open a
+        # previously-settled decision, and that conflict must be surfaced.
+        current_ids = {r.id for r in current.user_requirements}
+        new_ids = [r.id for r in updated.user_requirements if r.id not in current_ids]
+        conflicts = self.validator.consistency_conflicts(updated, focus_requirement_ids=new_ids)
+        if conflicts:
+            existing = {a.id for a in updated.ambiguities}
+            updated = updated.model_copy(update={
+                "ambiguities": list(updated.ambiguities) + [c for c in conflicts if c.id not in existing],
+            })
+
         updated = _sanitize_ambiguities(updated)
         self.log.info("coordinator.revise.done", remaining=len(updated.ambiguities))
         return updated

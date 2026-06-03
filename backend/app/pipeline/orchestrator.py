@@ -293,6 +293,7 @@ def _run_apply_clarifications_batch(uid: str, project_id: str, answers: list[dic
             else ProjectStatus.clarifying
         )
         firestore_service.set_project_status(uid, project_id, next_status)
+        firestore_service.update_project(uid, project_id, {"clarification_progress": {}})
         if not updated.ambiguities:
             log.info("clarifications.complete", uid=uid, project_id=project_id)
             _generate_and_store_summary_blueprint(uid, project_id)

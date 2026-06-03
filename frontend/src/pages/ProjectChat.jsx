@@ -7,7 +7,9 @@ import { ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
 import Logo from '../components/Logo'
 import ThemeToggle from '../components/ThemeToggle'
 import { getProjectStatus } from '../api/requirements'
-import { triggerStructuring, getClarifications, answerClarificationsBatch } from '../api/structure'
+import { triggerStructuring, getClarifications, answerClarificationsBatch, getClarificationProgress, saveClarificationProgress } from '../api/structure'
+import { getProject } from '../api/projects'
+import { startGeneration } from '../api/generation'
 
 const TERMINAL = new Set(['ready', 'ready_with_warnings', 'failed', 'awaiting_approval'])
 
@@ -181,27 +183,68 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
   )
 }
 
+const GENERATION_STAGES = new Set([
+  'architect', 'generating', 'generated', 'debugging',
+  'testing', 'tested', 'verifying', 'verified', 'packaging',
+])
+
 function FailedCard({ projectId, qc }) {
-  const retryMut = useMutation({
-    mutationFn: () => triggerStructuring(projectId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['project-status', projectId] }),
-    onError: (err) =>
-      toast.error(err.friendlyMessage || 'Failed to retry. Please try again.'),
+  const navigate = useNavigate()
+  const { data: project } = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => getProject(projectId),
   })
+
+  const stage = project?.current_stage || ''
+  const errorMessage = project?.error_message || project?.last_error || ''
+  const isGenFailure = GENERATION_STAGES.has(stage)
+
+  const retryMut = useMutation({
+    mutationFn: () =>
+      isGenFailure ? startGeneration(projectId) : triggerStructuring(projectId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['project-status', projectId] })
+      qc.invalidateQueries({ queryKey: ['project', projectId] })
+      toast.success(
+        isGenFailure
+          ? 'Retrying code generation — your requirements are saved'
+          : 'Re-analyzing your requirements…',
+      )
+      if (isGenFailure) {
+        navigate(`/projects/${projectId}/generation`)
+      }
+    },
+    onError: (err) =>
+      toast.error(err.friendlyMessage || 'Retry failed. Please try again.'),
+  })
+
+  const title = isGenFailure ? 'Code generation failed' : 'Something went wrong'
+  const description = isGenFailure
+    ? "The previous attempt didn't finish. Your approved requirements and blueprint are saved — Retry will pick up from code generation."
+    : "We couldn't analyze your requirements. Retry will run the analysis again."
+  const buttonText = isGenFailure ? 'Retry code generation' : 'Retry analysis'
 
   return (
     <div className="card flex flex-col items-center py-12 text-center">
       <AlertCircle className="w-10 h-10 text-red-500 mb-4" />
-      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">Something went wrong</h2>
-      <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-        We couldn&apos;t analyze your requirements.
+      <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">
+        {title}
+      </h2>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-4 max-w-md">
+        {description}
       </p>
+      {errorMessage && (
+        <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-md mb-4 max-w-md text-left font-mono break-words">
+          <span className="font-semibold not-italic">Previous error:</span><br/>
+          {errorMessage.length > 400 ? errorMessage.slice(0, 400) + '…' : errorMessage}
+        </div>
+      )}
       <button
-        className="btn-secondary"
+        className="btn-primary"
         onClick={() => retryMut.mutate()}
         disabled={retryMut.isPending}
       >
-        {retryMut.isPending ? 'Retrying…' : 'Retry'}
+        {retryMut.isPending ? 'Retrying…' : buttonText}
       </button>
     </div>
   )
@@ -209,11 +252,30 @@ function FailedCard({ projectId, qc }) {
 
 function ClarificationWizard({ clarifications, projectId, qc }) {
   const idsKey = clarifications.map((c) => c.id).join('|')
+
+  const { data: savedProgress } = useQuery({
+    queryKey: ['clarification-progress', projectId],
+    queryFn: () => getClarificationProgress(projectId),
+  })
+
   const [index, setIndex] = useState(0)
   const [answers, setAnswers] = useState({})
   const [freeText, setFreeText] = useState('')
 
-  useEffect(() => { setIndex(0); setAnswers({}); setFreeText('') }, [idsKey])
+  useEffect(() => {
+    const data = savedProgress || {}
+    const valid = Object.fromEntries(
+      Object.entries(data).filter(
+        ([id]) => clarifications.some((c) => c.id === id),
+      ),
+    )
+    setAnswers(valid)
+    const firstUnanswered = clarifications.findIndex((c) => !(c.id in valid))
+    setIndex(firstUnanswered === -1
+      ? Math.max(0, clarifications.length - 1)
+      : firstUnanswered)
+    setFreeText('')
+  }, [idsKey, savedProgress])
 
   const submitMut = useMutation({
     mutationFn: (all) => answerClarificationsBatch(projectId, all),
@@ -258,6 +320,7 @@ function ClarificationWizard({ clarifications, projectId, qc }) {
     const next = { ...answers, [current.id]: answer }
     setAnswers(next)
     setFreeText('')
+    saveClarificationProgress(projectId, next).catch(() => {})
     if (isLast) {
       submitMut.mutate(clarifications.map((c) => ({ ambiguity_id: c.id, answer: next[c.id] ?? '' })))
     } else {
@@ -292,10 +355,16 @@ function ClarificationWizard({ clarifications, projectId, qc }) {
             {opt}
           </button>
         ))}
-        <button onClick={() => record(current.suggested_options?.[0] ?? 'No preference')}
-          className="rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 text-sm hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors">
-          I don&apos;t know — pick a default
-        </button>
+        {(current.suggested_options ?? []).length > 0 && (
+          <button
+            onClick={() => record(current.suggested_options[0])}
+            className="rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 text-sm hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+            title={`Use ${current.suggested_options[0]}`}
+          >
+            I don&apos;t know — use the default:{' '}
+            <span className="font-medium">{current.suggested_options[0]}</span>
+          </button>
+        )}
       </div>
 
       <div className="flex items-center gap-3">

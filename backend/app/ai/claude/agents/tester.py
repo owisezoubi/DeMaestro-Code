@@ -1,5 +1,6 @@
 """TesterAgent — runs tests on generated code. Pure Python, no LLM."""
 import ast
+import json
 import os
 import shutil
 import subprocess
@@ -173,6 +174,15 @@ class TesterAgent:
             passed_checks["boot"] = boot_status
             logs["boot"] = boot_log
 
+            build_status, build_log = self._run_frontend_build(tmpdir)
+            passed_checks["frontend_build"] = build_status
+            logs["frontend_build"] = build_log
+
+            if passed_checks.get("frontend_build") == "passed":
+                smoke_status, smoke_log = self._run_smoke(tmpdir)
+                passed_checks["smoke"] = smoke_status
+                logs["smoke"] = smoke_log
+
             # Only "failed" checks produce errors; "skipped" is not a failure.
             errors = [
                 f"{check}: {logs[check]}"
@@ -291,6 +301,34 @@ class TesterAgent:
             except subprocess.TimeoutExpired:
                 log.warning("test_install.timeout")
                 return "failed", "timeout", None
+
+    def _run_frontend_build(self, tmpdir: Path) -> tuple[str, str]:
+        """Run `npm run build`. Returns (status, log)."""
+        frontend_dir = _find_frontend_dir(tmpdir)
+        if frontend_dir is None:
+            return ("skipped", "")
+        try:
+            result = subprocess.run(
+                ["npm", "run", "build"],
+                cwd=frontend_dir,
+                capture_output=True,
+                timeout=180,
+                text=True,
+            )
+            status = "passed" if result.returncode == 0 else "failed"
+            log_ = (result.stdout or "") + "\n" + (result.stderr or "")
+            log.info(
+                "test_frontend_build",
+                status=status,
+                returncode=result.returncode,
+                stderr_tail=(result.stderr or "")[-3000:],
+            )
+            return (status, log_)
+        except subprocess.TimeoutExpired:
+            return ("failed", "frontend build timeout")
+        except Exception as exc:
+            log.warning("frontend_build.exception", error=str(exc))
+            return ("skipped", str(exc))
 
     def _run_lint(self, tmpdir: Path, stack: str) -> tuple[str, str]:
         if "python" in stack:
@@ -427,3 +465,102 @@ class TesterAgent:
         except Exception as exc:
             log.error("test_boot.error", error=str(exc))
             return "failed", str(exc)
+
+    def _run_smoke(self, tmpdir: Path) -> tuple[str, str]:
+        """Boot backend + serve built frontend, hit the home page in a headless
+        browser, check no console errors and the page renders content."""
+        backend_dir = _find_backend_dir(tmpdir)
+        frontend_dir = _find_frontend_dir(tmpdir)
+        if not backend_dir or not frontend_dir:
+            return ("skipped", "no backend/frontend dir")
+
+        venv_py = tmpdir / ".testenv" / "bin" / "python"
+        if not venv_py.exists():
+            return ("skipped", "no venv")
+
+        dist_dir = frontend_dir / "dist"
+        if not dist_dir.exists():
+            return ("skipped", "no dist (build did not run)")
+
+        try:
+            subprocess.run(
+                ["npm", "exec", "--yes", "playwright", "install", "chromium", "--with-deps"],
+                cwd=frontend_dir, capture_output=True, timeout=180, text=True,
+            )
+            subprocess.run(
+                ["npm", "install", "--no-save", "playwright"],
+                cwd=frontend_dir, capture_output=True, timeout=120, text=True,
+            )
+        except Exception as exc:
+            log.warning("smoke.playwright_install_failed", error=str(exc))
+            return ("skipped", f"playwright install failed: {exc}")
+
+        smoke_script = """
+const { chromium } = require('playwright');
+
+(async () => {
+  const url = process.env.SMOKE_URL || 'http://localhost:5174';
+  const browser = await chromium.launch();
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  const errors = [];
+  page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
+  page.on('pageerror', e => errors.push(`PageError: ${e.message}`));
+  let bodyLen = 0;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(2000);
+    bodyLen = (await page.evaluate(() => document.body.innerText)).trim().length;
+  } catch (e) {
+    errors.push(`Navigation: ${e.message}`);
+  }
+  await browser.close();
+  const realErrors = errors.filter(e =>
+    !/Failed to fetch|NetworkError|ERR_CONNECTION|net::ERR/.test(e)
+  );
+  console.log(JSON.stringify({
+    ok: realErrors.length === 0 && bodyLen > 30,
+    bodyLen, errors: realErrors,
+  }));
+})().catch(e => {
+  console.log(JSON.stringify({ ok: false, errors: [e.message], bodyLen: 0 }));
+  process.exit(1);
+});
+"""
+        smoke_path = tmpdir / "smoke.cjs"
+        smoke_path.write_text(smoke_script)
+
+        preview = subprocess.Popen(
+            ["npm", "exec", "--yes", "vite", "preview", "--port", "5174", "--strictPort"],
+            cwd=frontend_dir,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            import time; time.sleep(3)
+            result = subprocess.run(
+                ["node", str(smoke_path)],
+                cwd=frontend_dir,
+                env={**os.environ, "SMOKE_URL": "http://localhost:5174"},
+                capture_output=True, timeout=60, text=True,
+            )
+            out = result.stdout.strip()
+            try:
+                parsed = json.loads(out.splitlines()[-1])
+            except Exception:
+                return ("failed", f"smoke output unparseable: {out[:500]}")
+            if parsed.get("ok"):
+                log.info("test_smoke.passed", body_len=parsed.get("bodyLen", 0))
+                return ("passed", out)
+            else:
+                log.warning(
+                    "test_smoke.failed",
+                    errors=parsed.get("errors", []),
+                    body_len=parsed.get("bodyLen", 0),
+                )
+                return ("failed", out)
+        finally:
+            preview.terminate()
+            try:
+                preview.wait(timeout=5)
+            except Exception:
+                preview.kill()

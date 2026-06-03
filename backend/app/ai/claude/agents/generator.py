@@ -37,6 +37,7 @@ _SCAFFOLDING_PATHS: frozenset[str] = frozenset({
     "docker-compose.yml",
     ".env.example",
     "SETUP.md",
+    "DATABASE.md",
 })
 
 
@@ -138,6 +139,20 @@ class GeneratorAgent:
   components, lucide-react) PLUS any package the architect declared in
   extra_frontend_dependencies: {plan.extra_frontend_dependencies}. Do not import npm
   packages outside the union of those two lists.
+- DEFENSIVE FRONTEND DATA: when destructuring from useQuery, ALWAYS
+  provide a sensible default — `const {{ data: items = [], isLoading }} = useQuery(...)`
+  for lists, `= {{}}` for objects. Before calling .filter / .map / .reduce / .some /
+  .find / .length on any value that came from a query, prop, or other async source,
+  use `(value ?? [])` or `value?.method?.()`. At the top of components that depend
+  on fetched data, render a loading state (e.g. <Skeleton /> or "Loading...") while
+  isLoading is true. Never assume async data is defined on first render.
+  Example:
+  // good:
+  const {{ data: items = [], isLoading }} = useQuery({{...}})
+  if (isLoading) return <Skeleton />
+  const grouped = useMemo(() => CATEGORIES.map(c => ({{
+    name: c, items: (items ?? []).filter(i => i.category === c)
+  }})), [items])
 
 **File-specific requirements (follow whichever applies to {file_to_gen.path}):**
 - backend/app/database.py: at the top do `from dotenv import load_dotenv; load_dotenv()`;
@@ -148,12 +163,15 @@ class GeneratorAgent:
 - model files: `from app.database import Base` (do NOT create a new declarative_base);
   use only portable column types (Integer, String, Text, Boolean, DateTime, Float,
   ForeignKey) — no JSONB/ARRAY/server-side UUID defaults.
-- backend/app/seed.py: expose seed_demo_data() that inserts several demo rows per
-  entity ONLY when its table is empty (idempotent); if auth exists, seed a demo user
-  demo@example.com / demo1234 (hashed).
-- backend/app/main.py: import all models, then on startup call create_tables() then
-  seed_demo_data(); configure CORS from os.getenv("CORS_ORIGINS",
-  "http://localhost:5173").
+- backend/app/seed.py: expose seed_demo_data() that inserts 3–5 realistic rows
+  per entity in dependency order (parents before children), reading actual field
+  names from models. Use real-sounding domain content, not placeholders. End with
+  a `print(f"[seed] done — ...", flush=True)`. Idempotent (empty-table check).
+  If auth exists, seed BOTH demo@example.com/demo1234 AND
+  admin@example.com/admin1234 (both properly hashed).
+- backend/app/main.py: import all models, then on startup call create_tables(),
+  then call seed_demo_data() inside a try/except that prints any exception. CORS
+  from os.getenv("CORS_ORIGINS", "http://localhost:5173").
 - any frontend file that calls the API: use
   `const API = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"` and
   prefix every request with `${{API}}`. Never hardcode a backend URL.

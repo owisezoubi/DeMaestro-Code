@@ -54,6 +54,24 @@ export async function answerClarificationsBatch(projectId, answers) {
   return r.data
 }
 
+export async function getClarificationProgress(projectId) {
+  try {
+    const r = await api.get(`/projects/${projectId}/clarifications/progress`)
+    return r.data?.answers || {}
+  } catch (err) {
+    if (err.response?.status === 404) return {}
+    throw err
+  }
+}
+
+export async function saveClarificationProgress(projectId, answers) {
+  const r = await api.put(
+    `/projects/${projectId}/clarifications/progress`,
+    { answers },
+  )
+  return r.data
+}
+
 export async function reviseRequirements(projectId, { answers, newRequirements }) {
   const r = await api.post(
     `/projects/${projectId}/requirements/revise`,

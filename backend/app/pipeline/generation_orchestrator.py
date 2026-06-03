@@ -26,7 +26,7 @@ from app.services import template_service
 
 log = structlog.get_logger("GenerationOrchestrator")
 
-_MAX_TEST_CYCLES = 5
+_MAX_TEST_CYCLES = 10
 
 
 class GenerationOrchestrator:

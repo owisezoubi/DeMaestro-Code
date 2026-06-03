@@ -63,11 +63,15 @@ class ProjectMeta(BaseModel):
     last_error: Optional[str] = None  # transient error (e.g. clarification failed); project stays retryable
     install_error_log: Optional[str] = None  # raw pip/npm output when install fails; kept for debugging
     test_error_log: Optional[str] = None  # raw test/boot errors (capped 5000 chars) for user inspection
+    clarification_progress: dict[str, str] = {}
     resolved_topics: list[str] = []
     user_added_requirements: list[str] = []
     last_change_request: Optional[str] = None
     modification_round: Optional[int] = None
     modification_round_completed: Optional[int] = None
+    last_modification_summary: Optional[str] = None
+    modified_files_last: list[str] = []
+    modification_history: list[dict] = []  # [{timestamp, request, summary, files_changed, round}]
     current_file: Optional[str] = None
     generated_count: int = 0
     total_files: int = 0

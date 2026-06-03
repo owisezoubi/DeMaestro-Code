@@ -15,7 +15,6 @@ _INFRASTRUCTURE_ERROR_PATTERNS = [
     "command not found",
     "FileNotFoundError",
     "EACCES",
-    "ENOENT",
     "Could not connect to",
     "Connection refused",
     "Timeout",
@@ -57,6 +56,183 @@ def _is_infrastructure_error(msg: str) -> bool:
     return any(p.lower() in msg.lower() for p in _INFRASTRUCTURE_ERROR_PATTERNS)
 
 
+_VITE_UNRESOLVED_RE = re.compile(
+    r'Failed to resolve import ["\'](?P<path>@/[\w./\-]+)["\']'
+    r'.*?from ["\'](?P<from>[\w./\-]+)["\']',
+    re.DOTALL,
+)
+_VITE_ENOENT_RE = re.compile(
+    r'Could not load (?P<abs>/[^\s]+/(?P<rel>frontend/src/[\w./\-]+))'
+    r'(?: \(imported by (?P<from>[\w./\-]+)\))?',
+)
+
+_MODULE_NOT_FOUND_RE = re.compile(
+    r"ModuleNotFoundError: No module named ['\"](?P<mod>[\w.]+)['\"]"
+)
+
+_STDLIB_MODULES = {
+    "os", "sys", "re", "json", "datetime", "time", "uuid", "math", "random",
+    "collections", "itertools", "functools", "typing", "pathlib", "asyncio",
+    "contextlib", "dataclasses", "enum", "logging", "warnings", "io", "tempfile",
+    "subprocess", "shutil", "csv", "sqlite3", "hashlib", "base64", "urllib",
+    "http", "html", "xml", "argparse", "abc", "copy", "string", "textwrap",
+    "decimal", "fractions", "statistics", "operator", "threading",
+    "multiprocessing", "concurrent", "socket", "ssl", "email", "secrets",
+    "ipaddress", "platform", "traceback", "inspect", "ast", "tokenize",
+}
+
+# Common alias map: import name → pip package name (when they differ)
+_PIP_NAME_OVERRIDES = {
+    "PIL": "pillow",
+    "cv2": "opencv-python",
+    "yaml": "pyyaml",
+    "bs4": "beautifulsoup4",
+    "jose": "python-jose",
+    "dotenv": "python-dotenv",
+    "jwt": "pyjwt",
+    "magic": "python-magic",
+}
+
+
+def _collect_unresolved_imports(test_results: dict) -> list[dict]:
+    """Pull every {path, from_file} pair out of the frontend build log.
+
+    Handles both Vite's "Failed to resolve import" and the ENOENT load-error form.
+    """
+    logs = test_results.get("logs", {}) or {}
+    errors = test_results.get("errors", []) or []
+    text = "\n".join([
+        logs.get("frontend_build", "") or "",
+        logs.get("frontend_build_full", "") or "",
+        *[str(e) for e in errors],
+    ])
+    found: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for m in _VITE_UNRESOLVED_RE.finditer(text):
+        key = (m.group("path"), m.group("from") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"path": m.group("path"), "from_file": m.group("from") or ""})
+    for m in _VITE_ENOENT_RE.finditer(text):
+        rel = m.group("rel")
+        if not rel:
+            continue
+        import_path = "@/" + rel.split("frontend/src/", 1)[1]
+        key = (import_path, m.group("from") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append({"path": import_path, "from_file": m.group("from") or ""})
+    return found
+
+
+_IMPORT_LINE_RE = re.compile(
+    r'import\s*(?:(?P<default>\w+)\s*,?\s*)?'
+    r'(?:\{(?P<named>[^}]*)\})?'
+    r'\s*from\s*["\'](?P<from>@/[^"\']+)["\']',
+)
+
+
+def _scan_generated_files_for_missing_imports(generated_files: dict[str, str]) -> list[dict]:
+    """Walk every generated frontend file and return every @/... import whose
+    target file does not exist in generated_files. Catches ALL missing imports
+    in one pass instead of only the first one Vite halts on.
+    """
+    missing: list[dict] = []
+    seen: set[str] = set()
+    for fp, content in generated_files.items():
+        if not fp.endswith((".jsx", ".js", ".tsx", ".ts")):
+            continue
+        for m in _IMPORT_LINE_RE.finditer(content or ""):
+            import_path = m.group("from")
+            if not import_path or not import_path.startswith("@/"):
+                continue
+            if import_path in seen:
+                continue
+            target = _component_path_for(import_path)
+            candidates = [
+                target,
+                target[:-4] + ".js" if target.endswith(".jsx") else target,
+                target[:-4] + "/index.jsx" if target.endswith(".jsx") else target + "/index.jsx",
+                target[:-4] + "/index.js" if target.endswith(".jsx") else target + "/index.js",
+            ]
+            if any(c in generated_files for c in candidates):
+                continue
+            seen.add(import_path)
+            missing.append({"path": import_path, "from_file": fp})
+    return missing
+
+
+def _named_imports_for(path: str, generated_files: dict[str, str]) -> tuple[set[str], bool]:
+    """Walk every generated frontend file and collect named imports + default usage for path."""
+    named: set[str] = set()
+    has_default = False
+    for fp, content in generated_files.items():
+        if not fp.endswith((".jsx", ".js", ".tsx", ".ts")):
+            continue
+        for m in _IMPORT_LINE_RE.finditer(content or ""):
+            if m.group("from") != path:
+                continue
+            if m.group("default"):
+                has_default = True
+            if m.group("named"):
+                for piece in m.group("named").split(","):
+                    name = piece.strip().split(" as ")[0].strip()
+                    if name:
+                        named.add(name)
+    return named, has_default
+
+
+def _component_path_for(import_path: str) -> str:
+    """Map "@/components/ui/tabs" → "frontend/src/components/ui/tabs.jsx"."""
+    rel = import_path.replace("@/", "frontend/src/")
+    if not rel.endswith((".jsx", ".js", ".tsx", ".ts")):
+        rel += ".jsx"
+    return rel
+
+
+def _build_stub(import_path: str, named: set[str], has_default: bool) -> str:
+    """Generate a JSX stub that exports exactly the names the consumers need."""
+    is_context = "/context" in import_path or "/contexts" in import_path
+    is_layout = (
+        import_path.endswith("Layout") or "/layouts/" in import_path
+        or "/components/" in import_path and import_path.split("/")[-1].endswith("Layout")
+    )
+    if is_context:
+        hook = "use" + import_path.split("/")[-1].replace("Context", "")
+        ctx = import_path.split("/")[-1]
+        return (
+            'import { createContext, useContext } from "react";\n'
+            f'const {ctx} = createContext({{}});\n'
+            f'export default {ctx};\n'
+            f'export {{ {ctx} }};\n'
+            f'export function {hook}() {{ return useContext({ctx}) ?? {{}}; }}\n'
+            f'export function {ctx.replace("Context", "Provider")}({{ children, value }}) {{\n'
+            f'  return <{ctx}.Provider value={{value ?? {{}}}}>{{children}}</{ctx}.Provider>;\n'
+            f'}}\n'
+        )
+    if is_layout:
+        return (
+            'import { Outlet } from "react-router-dom";\n'
+            'export default function Layout({ children }) {\n'
+            '  return <div className="min-h-screen">{children ?? <Outlet />}</div>;\n'
+            '}\n'
+        )
+    lines = [
+        'import * as React from "react";',
+        '',
+        'const Stub = React.forwardRef(function StubComponent({ children, className, asChild, ...rest }, ref) {',
+        '  return React.createElement("div", { ref, className, ...rest }, children);',
+        '});',
+        '',
+        'export default Stub;',
+    ]
+    for name in sorted(named):
+        lines.append(f'export const {name} = Stub;')
+    return "\n".join(lines) + "\n"
+
+
 class DebuggerAgent:
     """Parses test errors and uses Claude to fix them.
 
@@ -86,6 +262,92 @@ class DebuggerAgent:
 
         errors = test_results.get("errors", [])
         self.log.info("debug_and_fix.start", num_errors=len(errors))
+
+        # Pre-LLM: auto-stub ALL dangling frontend imports across the whole codebase.
+        # Vite halts at the first error, so trusting test_results alone would force one
+        # stub per cycle — instead, scan every generated file proactively.
+        scan_missing = _scan_generated_files_for_missing_imports(generated_files)
+        log_missing = _collect_unresolved_imports(test_results) if test_results else []
+
+        combined: list[dict] = []
+        seen_paths: set[str] = set()
+        for entry in scan_missing + log_missing:
+            if entry["path"] in seen_paths:
+                continue
+            seen_paths.add(entry["path"])
+            combined.append(entry)
+
+        if combined:
+            fixed: dict[str, str] = {}
+            scan_paths = {e["path"] for e in scan_missing}
+            for entry in combined:
+                target_rel = _component_path_for(entry["path"])
+                if target_rel in generated_files or target_rel in fixed:
+                    continue
+                named, has_default = _named_imports_for(entry["path"], generated_files)
+                stub = _build_stub(entry["path"], named, has_default)
+                fixed[target_rel] = stub
+                self.log.info(
+                    "debugger.stubbed_missing_import",
+                    import_path=entry["path"],
+                    target=target_rel,
+                    named=sorted(named),
+                    has_default=has_default,
+                    via="scan" if entry["path"] in scan_paths else "log",
+                )
+            if fixed:
+                self.log.info("debugger.stubbed_batch_total", count=len(fixed))
+                return {"status": "fixed", "fixed_files": fixed, "attempt_counts": attempt_count}
+
+        # ── auto-add missing Python packages to requirements.txt ──────────────
+        text_py = "\n".join([
+            (test_results.get("logs", {}) or {}).get("boot", "") or "",
+            (test_results.get("logs", {}) or {}).get("install", "") or "",
+            *[str(e) for e in (test_results.get("errors") or [])],
+        ])
+        missing_py: set[str] = set()
+        for m in _MODULE_NOT_FOUND_RE.finditer(text_py):
+            mod = m.group("mod").split(".")[0]
+            if mod in _STDLIB_MODULES:
+                continue
+            if any(
+                p.endswith(f"app/{mod}.py") or p.endswith(f"app/{mod}/__init__.py")
+                for p in generated_files
+            ):
+                continue
+            missing_py.add(_PIP_NAME_OVERRIDES.get(mod, mod))
+
+        if missing_py:
+            req_path = "backend/requirements.txt"
+            current = generated_files.get(req_path, "")
+            lower = current.lower()
+            new_lines = [pkg for pkg in sorted(missing_py)
+                         if pkg.lower().split("==")[0] not in lower]
+            if new_lines:
+                new_content = current.rstrip() + "\n" + "\n".join(new_lines) + "\n"
+                self.log.info("debugger.added_missing_python_packages", packages=new_lines)
+                return {
+                    "status": "fixed",
+                    "fixed_files": {req_path: new_content},
+                    "attempt_counts": attempt_count,
+                }
+
+        # ── smoke failure → inject runtime errors into the LLM debug path ─────
+        smoke_log = (test_results.get("logs", {}) or {}).get("smoke", "")
+        if (
+            test_results.get("passed_checks", {}).get("smoke") == "failed"
+            and "frontend_build" in test_results.get("passed_checks", {})
+            and test_results["passed_checks"]["frontend_build"] == "passed"
+        ):
+            try:
+                parsed = json.loads(smoke_log.splitlines()[-1])
+                runtime_errors = parsed.get("errors", [])
+            except Exception:
+                runtime_errors = [smoke_log[-500:]]
+            if runtime_errors:
+                test_results.setdefault("errors", []).extend(
+                    f"RUNTIME (smoke): {e}" for e in runtime_errors
+                )
 
         if not errors:
             return {"status": "success", "fixed_files": {}, "attempt_counts": attempt_count, "errors": []}

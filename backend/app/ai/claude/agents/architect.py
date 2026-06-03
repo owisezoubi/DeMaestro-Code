@@ -83,14 +83,23 @@ DATABASE — the generated app MUST run with zero setup on any machine:
   `from app.database import Base` (one shared Base) — never call declarative_base()
   again — so create_tables() actually creates all tables.
 
-DEMO / SEED DATA (the app must never open empty):
-- Include `backend/app/seed.py` exposing `seed_demo_data()` that inserts several
-  realistic demo rows for EVERY entity (with valid foreign keys linking them),
-  but ONLY when a table is empty (idempotent: check count() == 0 first).
-- If the app has authentication, also seed one demo user — email
-  "demo@example.com", password "demo1234" (properly hashed) — so the user can log
-  in and see data.
-- main.py must call seed_demo_data() once on startup, AFTER create_tables().
+DEMO / SEED DATA — REQUIRED, the app must never open empty:
+- Include `backend/app/seed.py` exposing `seed_demo_data()` that inserts AT LEAST
+  3–5 realistic demo rows per entity (with valid foreign keys linking them).
+  Realistic = real-sounding values matching the app's domain, not "Test 1" /
+  "Lorem ipsum". For a restaurant: actual menu items + prices. For a task
+  planner: actual tasks. Etc.
+- Seed Categories / parent entities FIRST, then dependent rows referencing the
+  real ids.
+- Idempotent: check `db.query(Model).count() == 0` before inserting each entity.
+- Print a final log line: `print(f"[seed] done — N items=...", flush=True)` so
+  it's visible in the backend startup log.
+- If the app has authentication, seed BOTH a demo customer
+  (demo@example.com / demo1234) AND a demo admin (admin@example.com / admin1234)
+  so the user can immediately try both roles.
+- main.py MUST `from app.seed import seed_demo_data` and call
+  `seed_demo_data()` once on startup AFTER create_tables(), wrapped in
+  try/except that prints any exception (no silent failures).
 
 DEPLOYMENT-READY CONFIG (keep config env-driven; do NOT add deploy files):
 - Backend: read DATABASE_URL, CORS_ORIGINS (comma-separated), and the port from the
@@ -140,6 +149,35 @@ Output a JSON GenerationPlan with:
 - Then data routes (CRUD endpoints for each entity)
 - Then React pages (login, dashboard, entity pages, forms)
 - Total files: 10-20 APPLICATION code files (do not count scaffolding)
+- Every frontend layout/context/component referenced by an import statement must be
+  in your `files` list. If you import @/components/X, @/contexts/Y, or @/layouts/Z,
+  those files must appear in the plan. The debugger will stub anything missing as a
+  fallback, but the plan should be self-consistent.
+- The generator may import shadcn/ui components beyond the 12 core ones (tabs,
+  dialog, dropdown-menu, alert-dialog, etc.) because the pipeline will stub any
+  missing ones automatically. But for visual polish in real demos, prefer the 12
+  guaranteed components.
+- DEPENDENCIES PRE-DECLARE: if the planned UI uses react-hook-form, zod,
+  @hookform/resolvers, date-fns, recharts, framer-motion, lodash, axios — list
+  them in extra_frontend_dependencies. If the backend uses apscheduler, celery,
+  redis, requests, httpx, boto3 — list them in extra_dependencies. The debugger
+  will recover if you forget, but it costs cycles.
+- DEFENSIVE FRONTEND: every useQuery destructure must have a default
+  (`data: items = []`); every .filter/.map/.reduce on async data must use
+  `(value ?? [])`. Always render a loading state while isLoading.
+- SEED DATA: seed.py must insert AT LEAST 3–5 rows per entity with realistic
+  domain content (not "Test 1"), parents before children, idempotent
+  (count()==0 check), and end with a printed summary line.
+- TWO DEMO USERS: if auth exists, seed demo@example.com/demo1234 AND
+  admin@example.com/admin1234.
+- API CONTRACT: every fetch in the frontend MUST hit a path that exists in the
+  backend — verify your plan covers both ends of each call.
+- DB: database.py MUST `load_dotenv()`, default DATABASE_URL to
+  sqlite:///./app.db, pass connect_args={{"check_same_thread": False}} for
+  sqlite, use SYNC SQLAlchemy and portable column types.
+- IMPORTS: every @/components/ X import must point to a file in your plan OR
+  one of the 12 core shadcn components. Bare npm imports must be in
+  extra_frontend_dependencies.
 
 ## Files you must NOT include in your plan
 

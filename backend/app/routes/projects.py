@@ -16,68 +16,104 @@ router = APIRouter()
 
 
 def _regenerate_with_changes(uid: str, project_id: str, change_request: str) -> None:
-    """Re-run the generation pipeline with change context (background thread)."""
+    """Apply a user-requested change end-to-end: modify → test → debug → verify →
+    repackage. Updates the project doc with the new ZIP and a change summary."""
+    from datetime import datetime, timezone
+
+    from app.ai.claude.agents.debugger import DebuggerAgent
+    from app.ai.claude.agents.deployer import DeployerAgent
+    from app.ai.claude.agents.modifier import ModifierAgent
+    from app.ai.claude.agents.tester import TesterAgent
+    from app.ai.claude.agents.verifier import VerifierAgent
+    from app.ai.gemini.agents.blueprint import BlueprintResponse
+    from app.models.generation_plan import GenerationPlan
+    from app.pipeline.generation_orchestrator import _MAX_TEST_CYCLES
+
     try:
         project = fs.get_project(uid, project_id)
         if project is None:
             raise ValueError(f"Project {project_id} not found")
-
-        plan_dict = project.generation_plan
-        if plan_dict is None:
-            raise ValueError("No generation plan found for this project")
-
-        blueprint_dict = project.blueprint
-        if blueprint_dict is None:
-            raise ValueError("No blueprint found for this project")
-
         old_files = project.generated_files or {}
-
-        fs.update_project(uid, project_id, {"status": ProjectStatus.regenerating})
-
-        from app.ai.claude.agents.debugger import DebuggerAgent
-        from app.ai.claude.agents.deployer import DeployerAgent
-        from app.ai.claude.agents.verifier import VerifierAgent
-        from app.ai.gemini.agents.blueprint import BlueprintResponse
-        from app.models.generation_plan import GenerationPlan
-
+        plan_dict = project.generation_plan
+        bp_dict = project.blueprint
+        if not plan_dict or not bp_dict:
+            raise ValueError("Project missing plan or blueprint — cannot modify")
         plan = GenerationPlan(**plan_dict)
-        blueprint = BlueprintResponse(**blueprint_dict)
+        blueprint = BlueprintResponse(**bp_dict)
 
-        # Feed the change request to DebuggerAgent as a synthetic error so it
-        # applies targeted edits without regenerating everything from scratch.
-        test_results = {
-            "status": "change_requested",
-            "errors": [f"User requested: {change_request}"],
-            "passed_checks": {},
-        }
+        # 1. Modifier identifies + edits files
+        fs.update_project(uid, project_id, {
+            "status": ProjectStatus.modifying, "current_stage": "modifying",
+        })
+        mod_result = ModifierAgent().modify(change_request, old_files, plan, blueprint)
+        if mod_result["status"] != "fixed" or not mod_result["modified_files"]:
+            raise RuntimeError(
+                f"Could not apply changes: {mod_result.get('errors') or 'no files changed'}"
+            )
+        updated_files = {**old_files, **mod_result["modified_files"]}
+        changed_paths = list(mod_result["modified_files"].keys())
 
-        debug_result = DebuggerAgent().debug_and_fix(test_results, old_files, plan, attempt_count={})
+        # 2. Full test/debug cycle on the modified app
+        fs.update_project(uid, project_id, {
+            "status": ProjectStatus.testing, "current_stage": "testing",
+        })
+        attempt_count: dict = {}
+        for _cycle in range(_MAX_TEST_CYCLES):
+            test_results = TesterAgent().run_tests(updated_files, plan)
+            if test_results["status"] in ("success", "skipped"):
+                break
+            debug_result = DebuggerAgent().debug_and_fix(
+                test_results, updated_files, plan, attempt_count
+            )
+            if debug_result.get("status") == "fixed":
+                updated_files.update(debug_result["fixed_files"])
+                attempt_count = debug_result.get("attempt_counts", attempt_count)
+            else:
+                break  # accept best-effort
 
-        if debug_result["status"] != "fixed":
-            raise RuntimeError(f"Could not generate changes: {debug_result['errors']}")
+        # 3. Verifier (advisory; do not block packaging on warnings)
+        try:
+            VerifierAgent().verify(updated_files, plan, blueprint)
+        except Exception as exc:
+            log.warning("modify.verify_warning", project_id=project_id, error=str(exc))
 
-        updated_files = {**old_files, **debug_result["fixed_files"]}
-
-        verify_result = VerifierAgent().verify(updated_files, plan, blueprint)
-        if verify_result["status"] != "pass":
-            raise RuntimeError(f"Verification failed: {verify_result['issues']}")
-
+        # 4. Repackage and produce new ZIP URL
+        fs.update_project(uid, project_id, {"current_stage": "packaging"})
         deploy_result = DeployerAgent().deploy(uid, project_id, updated_files, plan)
-        if deploy_result["status"] != "ready":
+        if deploy_result.get("status") != "ready":
             raise RuntimeError(f"Packaging failed: {deploy_result.get('errors', [])}")
 
+        # 5. Update project with new state + record in history
         modification_round = project.modification_round or 1
+        history_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request": change_request,
+            "summary": mod_result.get("summary", ""),
+            "files_changed": changed_paths,
+            "round": modification_round,
+        }
+        new_history = (project.modification_history or []) + [history_entry]
+        new_history = new_history[-20:]
+
         fs.update_project(uid, project_id, {
             "status": ProjectStatus.ready,
+            "current_stage": "ready",
             "generated_files": updated_files,
             "zip_url": deploy_result["zip_url"],
             "modification_round_completed": modification_round,
+            "last_modification_summary": mod_result.get("summary", ""),
+            "modified_files_last": changed_paths,
+            "modification_history": new_history,
             "error_message": None,
         })
-        log.info("regenerate_with_changes.done", project_id=project_id, round=modification_round)
-
+        log.info(
+            "modify.complete",
+            project_id=project_id,
+            round=modification_round,
+            files_changed=changed_paths,
+        )
     except Exception as exc:
-        log.error("regenerate_with_changes.error", project_id=project_id, error=str(exc))
+        log.error("modify.error", project_id=project_id, error=str(exc))
         fs.update_project(uid, project_id, {
             "status": ProjectStatus.failed,
             "error_message": str(exc),

@@ -142,6 +142,30 @@ async def answer_clarification(
 
 # ---------- Batch clarifications ----------
 
+class ProgressPayload(BaseModel):
+    answers: dict[str, str]
+
+
+@router.get("/{project_id}/clarifications/progress")
+async def get_clarification_progress(project_id: str, user: CurrentUser):
+    project = _require_project(user.uid, project_id)
+    return {"answers": project.clarification_progress or {}}
+
+
+@router.put("/{project_id}/clarifications/progress")
+async def save_clarification_progress(
+    project_id: str, payload: ProgressPayload, user: CurrentUser,
+):
+    _require_project(user.uid, project_id)
+    cleaned = {k: v for k, v in (payload.answers or {}).items() if v and v.strip()}
+    firestore_service.update_project(user.uid, project_id, {
+        "clarification_progress": cleaned,
+    })
+    return {"saved": len(cleaned)}
+
+
+# ---------- Batch clarifications ----------
+
 class BatchAnswerItem(BaseModel):
     ambiguity_id: str
     answer: str = Field(..., min_length=1)
@@ -246,6 +270,7 @@ async def revise_requirements(project_id: str, payload: ReviseRequest, user: Cur
         "approved_at": None,
         "clarification_round": 0,
         "last_error": None,
+        "clarification_progress": {},
         "user_added_requirements": merged_added,
     })
     pipeline.kick_off_revision(user.uid, project_id, answers, cleaned_new)

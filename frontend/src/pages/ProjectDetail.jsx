@@ -1,26 +1,28 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Download } from 'lucide-react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { ArrowLeft, Download, Pencil, Loader2, History, CheckCircle2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import Logo from '../components/Logo'
 import ThemeToggle from '../components/ThemeToggle'
 import { getProject, requestChanges } from '../api/projects'
 
+const IN_PROGRESS_STATUSES = new Set([
+  'modifying', 'testing', 'tested', 'debugging', 'verifying', 'packaging', 'regenerating',
+])
+
 export default function ProjectDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const queryClient = useQueryClient()
-  const [changeRequest, setChangeRequest] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const qc = useQueryClient()
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', id],
     queryFn: () => getProject(id),
     refetchInterval: (query) => {
-      const status = query.state.data?.status
-      return status === 'modifying' || status === 'regenerating' ? 3000 : false
+      const s = query.state.data?.status
+      return IN_PROGRESS_STATUSES.has(s) ? 2000 : false
     },
   })
 
@@ -40,24 +42,6 @@ export default function ProjectDetail() {
     )
   }
 
-  async function handleRequestChanges() {
-    if (!changeRequest.trim()) {
-      toast.error('Please describe the changes you want')
-      return
-    }
-    setIsSubmitting(true)
-    try {
-      await requestChanges(id, changeRequest)
-      toast.success('Changes requested. Regenerating…')
-      setChangeRequest('')
-      queryClient.invalidateQueries({ queryKey: ['project', id] })
-    } catch (err) {
-      toast.error('Failed: ' + (err.friendlyMessage || err.message))
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
       <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
@@ -65,10 +49,7 @@ export default function ProjectDetail() {
           <Logo />
           <div className="flex items-center gap-3">
             <ThemeToggle />
-            <button
-              onClick={() => navigate('/dashboard')}
-              className="btn-secondary"
-            >
+            <button onClick={() => navigate('/dashboard')} className="btn-secondary">
               <ArrowLeft className="w-4 h-4 mr-2" />
               Dashboard
             </button>
@@ -82,28 +63,21 @@ export default function ProjectDetail() {
             <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">{project.name}</h1>
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
               Status: <span className="font-medium">{project.status?.replace(/_/g, ' ')}</span>
+              {IN_PROGRESS_STATUSES.has(project.status) && project.current_stage && project.current_stage !== project.status && (
+                <span className="ml-2 text-slate-400 dark:text-slate-500">
+                  · stage: {project.current_stage.replace(/_/g, ' ')}
+                </span>
+              )}
             </p>
           </div>
 
-          {project.zip_url && (
-            <a
-              href={project.zip_url}
-              download
-              className="btn-primary"
-            >
+          {project.zip_url && !IN_PROGRESS_STATUSES.has(project.status) && (
+            <a href={project.zip_url} download className="btn-primary">
               <Download className="w-4 h-4 mr-2" />
               Download ZIP
             </a>
           )}
         </div>
-
-        {(project.status === 'modifying' || project.status === 'regenerating') && (
-          <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg text-blue-800 text-sm mb-8">
-            {project.status === 'modifying'
-              ? 'Preparing to regenerate with your changes…'
-              : 'Regenerating your app with the requested changes…'}
-          </div>
-        )}
 
         {project.status === 'deployment_failed' && (
           <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm mb-8">
@@ -112,26 +86,17 @@ export default function ProjectDetail() {
         )}
 
         {(project.status === 'ready' || project.status === 'ready_with_warnings') && (
-          <div className="border-t border-slate-200 dark:border-slate-700 pt-8">
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-1">Request Changes</h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">
-              Describe what you want to add, remove, or change in the app.
-            </p>
-            <textarea
-              value={changeRequest}
-              onChange={(e) => setChangeRequest(e.target.value)}
-              placeholder="e.g. Add a dark mode toggle, change the dashboard layout…"
-              rows={5}
-              className="w-full rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-2 text-sm text-slate-900 dark:text-slate-100 bg-white dark:bg-slate-800 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
-            />
-            <button
-              onClick={handleRequestChanges}
-              disabled={isSubmitting}
-              className="btn-primary mt-4 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isSubmitting ? 'Processing…' : 'Request Changes'}
-            </button>
-          </div>
+          <>
+            <ChangeRequestPanel projectId={id} project={project} qc={qc} />
+            <ModificationHistoryPanel history={project?.modification_history} />
+          </>
+        )}
+
+        {IN_PROGRESS_STATUSES.has(project.status) && project.status !== 'ready' && (
+          <>
+            <ChangeRequestPanel projectId={id} project={project} qc={qc} />
+            <ModificationHistoryPanel history={project?.modification_history} />
+          </>
         )}
 
         {project.modification_round != null && project.modification_round > 0 && (
@@ -140,6 +105,123 @@ export default function ProjectDetail() {
           </p>
         )}
       </main>
+    </div>
+  )
+}
+
+function ChangeRequestPanel({ projectId, project, qc }) {
+  const [text, setText] = useState('')
+  const inProgress = IN_PROGRESS_STATUSES.has(project?.status)
+  const lastSummary = project?.last_modification_summary
+  const lastFiles = project?.modified_files_last || []
+
+  const mut = useMutation({
+    mutationFn: () => requestChanges(projectId, text.trim()),
+    onSuccess: () => {
+      toast.success('Working on your changes…')
+      setText('')
+      qc.invalidateQueries({ queryKey: ['project', projectId] })
+    },
+    onError: (err) =>
+      toast.error(err.friendlyMessage || err.message || 'Could not start change'),
+  })
+
+  return (
+    <div className="card mt-6">
+      <div className="flex items-center gap-2 mb-3">
+        <Pencil className="w-5 h-5 text-primary-600" />
+        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          Request changes
+        </h2>
+      </div>
+      <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
+        Describe what you want changed (e.g. "make the navbar dark blue",
+        "add an 'About' page", "show the price in EUR"). DeMaestro will edit only
+        the files needed, re-test, and give you a new download link.
+      </p>
+
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        className="input w-full mb-3 resize-y"
+        placeholder="What should change?"
+        disabled={inProgress || mut.isPending}
+      />
+
+      {inProgress && (
+        <div className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400 mb-3">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          {project?.current_stage
+            ? `Stage: ${project.current_stage.replace(/_/g, ' ')}…`
+            : 'Working on your changes…'}
+        </div>
+      )}
+
+      {!inProgress && lastSummary && (
+        <div className="border-l-4 border-emerald-500 bg-emerald-50/40 dark:bg-emerald-600/10 p-3 rounded-r-md mb-3">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                Last change: {lastSummary}
+              </p>
+              {lastFiles.length > 0 && (
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                  {lastFiles.length} file{lastFiles.length === 1 ? '' : 's'} updated:{' '}
+                  {lastFiles.slice(0, 3).join(', ')}
+                  {lastFiles.length > 3 && ` +${lastFiles.length - 3} more`}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex justify-end gap-2">
+        {project?.zip_url && !inProgress && (
+          <a href={project.zip_url} className="btn-secondary">
+            <Download className="w-4 h-4 mr-2" /> Download latest
+          </a>
+        )}
+        <button
+          className="btn-primary"
+          onClick={() => mut.mutate()}
+          disabled={!text.trim() || inProgress || mut.isPending}
+        >
+          {mut.isPending ? 'Submitting…' : 'Apply change'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ModificationHistoryPanel({ history }) {
+  if (!history || history.length === 0) return null
+  const sorted = [...history].reverse().slice(0, 10)
+  return (
+    <div className="card mt-6">
+      <div className="flex items-center gap-2 mb-3">
+        <History className="w-5 h-5 text-slate-500" />
+        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+          Change history
+        </h2>
+      </div>
+      <ol className="space-y-3">
+        {sorted.map((h, i) => (
+          <li key={i} className="border-l-2 border-slate-200 dark:border-slate-700 pl-3">
+            <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+              {h.summary || h.request}
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              {new Date(h.timestamp).toLocaleString()}
+              {h.files_changed?.length
+                ? ` · ${h.files_changed.length} file(s)`
+                : ''}
+            </p>
+          </li>
+        ))}
+      </ol>
     </div>
   )
 }

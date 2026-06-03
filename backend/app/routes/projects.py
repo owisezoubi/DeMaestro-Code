@@ -45,7 +45,12 @@ def _regenerate_with_changes(uid: str, project_id: str, change_request: str) -> 
         fs.update_project(uid, project_id, {
             "status": ProjectStatus.modifying, "current_stage": "modifying",
         })
-        mod_result = ModifierAgent().modify(change_request, old_files, plan, blueprint)
+        from app.services import firestore_service as _fs
+        sr = _fs.get_latest_structured_requirements(uid, project_id)
+        mod_result = ModifierAgent().modify(
+            change_request, old_files, plan, blueprint,
+            structured_requirements=sr,
+        )
         if mod_result["status"] != "fixed" or not mod_result["modified_files"]:
             raise RuntimeError(
                 f"Could not apply changes: {mod_result.get('errors') or 'no files changed'}"

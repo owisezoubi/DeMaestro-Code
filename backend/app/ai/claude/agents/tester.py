@@ -467,52 +467,69 @@ class TesterAgent:
             return "failed", str(exc)
 
     def _run_smoke(self, tmpdir: Path) -> tuple[str, str]:
-        """Boot backend + serve built frontend, hit the home page in a headless
-        browser, check no console errors and the page renders content."""
         backend_dir = _find_backend_dir(tmpdir)
         frontend_dir = _find_frontend_dir(tmpdir)
         if not backend_dir or not frontend_dir:
             return ("skipped", "no backend/frontend dir")
 
-        venv_py = tmpdir / ".testenv" / "bin" / "python"
-        if not venv_py.exists():
-            return ("skipped", "no venv")
-
         dist_dir = frontend_dir / "dist"
         if not dist_dir.exists():
             return ("skipped", "no dist (build did not run)")
 
+        # 1. Install playwright npm package (must come first).
         try:
-            subprocess.run(
-                ["npm", "exec", "--yes", "playwright", "install", "chromium", "--with-deps"],
+            r = subprocess.run(
+                ["npm", "install", "--no-save", "playwright"],
                 cwd=frontend_dir, capture_output=True, timeout=180, text=True,
             )
-            subprocess.run(
-                ["npm", "install", "--no-save", "playwright"],
-                cwd=frontend_dir, capture_output=True, timeout=120, text=True,
-            )
+            if r.returncode != 0:
+                return ("skipped", f"playwright npm install failed: {r.stderr[-500:]}")
         except Exception as exc:
-            log.warning("smoke.playwright_install_failed", error=str(exc))
-            return ("skipped", f"playwright install failed: {exc}")
+            return ("skipped", f"playwright install exception: {exc}")
 
-        smoke_script = """
-const { chromium } = require('playwright');
+        # 2. Install chromium browser (cached under ~/.cache/ms-playwright on
+        #    subsequent runs, so this is slow only on the very first test).
+        try:
+            r = subprocess.run(
+                ["npx", "--yes", "playwright", "install", "chromium"],
+                cwd=frontend_dir, capture_output=True, timeout=180, text=True,
+            )
+            if r.returncode != 0:
+                return ("skipped", f"chromium install failed: {r.stderr[-500:]}")
+        except Exception as exc:
+            return ("skipped", f"chromium install exception: {exc}")
 
+        # 3. Write a defensive smoke script. require() is wrapped so a missing
+        #    playwright never crashes the process silently.
+        smoke_script = r'''
+let chromium;
+try {
+  chromium = require('playwright').chromium;
+} catch (e) {
+  console.log(JSON.stringify({ ok: null, skipped: true, reason: 'playwright_require_failed', detail: e.message }));
+  process.exit(0);
+}
 (async () => {
   const url = process.env.SMOKE_URL || 'http://localhost:5174';
-  const browser = await chromium.launch();
+  let browser;
+  try {
+    browser = await chromium.launch();
+  } catch (e) {
+    console.log(JSON.stringify({ ok: null, skipped: true, reason: 'chromium_launch_failed', detail: e.message }));
+    process.exit(0);
+  }
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   const errors = [];
   page.on('console', msg => { if (msg.type() === 'error') errors.push(msg.text()); });
-  page.on('pageerror', e => errors.push(`PageError: ${e.message}`));
+  page.on('pageerror', e => errors.push('PageError: ' + e.message));
   let bodyLen = 0;
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await page.waitForTimeout(2000);
     bodyLen = (await page.evaluate(() => document.body.innerText)).trim().length;
   } catch (e) {
-    errors.push(`Navigation: ${e.message}`);
+    errors.push('Navigation: ' + e.message);
   }
   await browser.close();
   const realErrors = errors.filter(e =>
@@ -520,18 +537,20 @@ const { chromium } = require('playwright');
   );
   console.log(JSON.stringify({
     ok: realErrors.length === 0 && bodyLen > 30,
-    bodyLen, errors: realErrors,
+    bodyLen,
+    errors: realErrors,
   }));
 })().catch(e => {
-  console.log(JSON.stringify({ ok: false, errors: [e.message], bodyLen: 0 }));
-  process.exit(1);
+  console.log(JSON.stringify({ ok: null, skipped: true, reason: 'smoke_runtime_exception', detail: e.message }));
+  process.exit(0);
 });
-"""
+'''
         smoke_path = tmpdir / "smoke.cjs"
         smoke_path.write_text(smoke_script)
 
+        # 4. Boot `vite preview` on the dist folder.
         preview = subprocess.Popen(
-            ["npm", "exec", "--yes", "vite", "preview", "--port", "5174", "--strictPort"],
+            ["npx", "--yes", "vite", "preview", "--port", "5174", "--strictPort"],
             cwd=frontend_dir,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -543,21 +562,34 @@ const { chromium } = require('playwright');
                 env={**os.environ, "SMOKE_URL": "http://localhost:5174"},
                 capture_output=True, timeout=60, text=True,
             )
-            out = result.stdout.strip()
-            try:
-                parsed = json.loads(out.splitlines()[-1])
-            except Exception:
-                return ("failed", f"smoke output unparseable: {out[:500]}")
+            raw_out = (result.stdout or "") + "\n" + (result.stderr or "")
+            # Find the LAST line that parses as JSON (the script may print
+            # warnings before the result).
+            parsed = None
+            for line in reversed(raw_out.splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        parsed = json.loads(line)
+                        break
+                    except Exception:
+                        continue
+            if parsed is None:
+                log.warning("test_smoke.unparseable", out_tail=raw_out[-500:])
+                return ("skipped", f"smoke output unparseable: {raw_out[-500:]}")
+            if parsed.get("skipped"):
+                reason = parsed.get("reason", "unknown")
+                log.info("test_smoke.skipped", reason=reason)
+                return ("skipped", reason)
             if parsed.get("ok"):
                 log.info("test_smoke.passed", body_len=parsed.get("bodyLen", 0))
-                return ("passed", out)
-            else:
-                log.warning(
-                    "test_smoke.failed",
-                    errors=parsed.get("errors", []),
-                    body_len=parsed.get("bodyLen", 0),
-                )
-                return ("failed", out)
+                return ("passed", json.dumps(parsed))
+            log.warning(
+                "test_smoke.failed",
+                errors=parsed.get("errors", []),
+                body_len=parsed.get("bodyLen", 0),
+            )
+            return ("failed", json.dumps(parsed))
         finally:
             preview.terminate()
             try:

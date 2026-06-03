@@ -53,6 +53,7 @@ class GeneratorAgent:
         plan: GenerationPlan,
         blueprint: BlueprintResponse,
         previously_generated: dict[str, str],
+        structured_requirements=None,
     ) -> str:
         """Generate a single file's content."""
         self.log.info("generate_file.start", path=file_to_gen.path)
@@ -68,7 +69,10 @@ class GeneratorAgent:
 
         template = self.templates.get(file_to_gen.template) if file_to_gen.template != "none" else None
 
-        prompt = self._build_generate_prompt(file_to_gen, plan, blueprint, previously_generated, template)
+        prompt = self._build_generate_prompt(
+            file_to_gen, plan, blueprint, previously_generated,
+            structured_requirements=structured_requirements, template=template,
+        )
 
         client = Anthropic(api_key=settings.anthropic_api_key)
         response = client.messages.create(
@@ -96,6 +100,7 @@ class GeneratorAgent:
         plan: GenerationPlan,
         blueprint: BlueprintResponse,
         previously_generated: dict[str, str],
+        structured_requirements=None,
         template: str | None = None,
     ) -> str:
         deps_context = ""
@@ -106,6 +111,42 @@ class GeneratorAgent:
         template_hint = (
             f"\n\n**Use this template as a starting point:**\n```\n{template}\n```" if template else ""
         )
+
+        # Build the user requirements section
+        requirements_section = ""
+        if structured_requirements is not None:
+            reqs_lines = []
+            for r in structured_requirements.user_requirements:
+                ac = "; ".join(r.acceptance_criteria or [])
+                reqs_lines.append(
+                    f"- [{r.priority.upper() if r.priority else 'SHOULD'}] {r.statement}"
+                    + (f"  (acceptance: {ac})" if ac else "")
+                )
+            entities_lines = []
+            for e in structured_requirements.entities:
+                fields = ", ".join(e.fields or [])
+                entities_lines.append(f"- {e.name}: {e.description}  (fields: {fields})")
+            added = getattr(structured_requirements, "user_added_requirements", None) or []
+            added_block = ""
+            if added:
+                added_block = (
+                    "\n\n**Requirements the user added later (HIGH priority — they specifically asked):**\n"
+                    + "\n".join(f"- {r}" for r in added)
+                )
+            requirements_section = f"""
+
+**User requirements (apply these directly to THIS file when relevant):**
+{chr(10).join(reqs_lines) if reqs_lines else "(none)"}
+
+**Entities:**
+{chr(10).join(entities_lines) if entities_lines else "(none)"}{added_block}
+
+When writing this file, honor every requirement above that touches what the file
+does — numeric values (tax rates, limits), enums (statuses, categories),
+behaviors (sort orders, filters, notifications), and any explicit styling or
+visual preferences. Do NOT silently substitute defaults for things the user
+explicitly specified.
+"""
 
         return f"""You are a code generator. Generate ONLY the file content, no explanations.
 
@@ -118,6 +159,9 @@ class GeneratorAgent:
 - API routes: {[r.path for r in blueprint.api_routes]}
 - Frontend pages: {[p.name for p in blueprint.frontend_pages]}
 
+**Design brief / plan notes:**
+{plan.notes or "(none)"}
+{requirements_section}
 **Dependencies (already generated):**
 {deps_context if deps_context else "(none)"}
 {template_hint}
@@ -139,19 +183,45 @@ class GeneratorAgent:
   components, lucide-react) PLUS any package the architect declared in
   extra_frontend_dependencies: {plan.extra_frontend_dependencies}. Do not import npm
   packages outside the union of those two lists.
-- DEFENSIVE FRONTEND DATA: when destructuring from useQuery, ALWAYS
-  provide a sensible default — `const {{ data: items = [], isLoading }} = useQuery(...)`
-  for lists, `= {{}}` for objects. Before calling .filter / .map / .reduce / .some /
-  .find / .length on any value that came from a query, prop, or other async source,
-  use `(value ?? [])` or `value?.method?.()`. At the top of components that depend
-  on fetched data, render a loading state (e.g. <Skeleton /> or "Loading...") while
-  isLoading is true. Never assume async data is defined on first render.
+- DEFENSIVE FRONTEND DATA — be strict about types, not just null:
+  * useQuery destructures ALWAYS get a typed default:
+        const {{ data: items = [], isLoading }} = useQuery(...)    // for lists
+        const {{ data: order = null, isLoading }} = useQuery(...)  // for objects
+  * Before calling .filter / .map / .reduce / .some / .find / .length on any
+    value that came from useQuery, props, or storage, use:
+        Array.isArray(value) ? value : []
+    NOT just `(value ?? [])` — `??` does not protect against an object, string,
+    or stale wrong shape.
+  * When reading from localStorage / sessionStorage, ALWAYS wrap in try/catch
+    AND validate the parsed shape before using it:
+        const stored = (() => {{
+          try {{
+            const raw = JSON.parse(localStorage.getItem("KEY") ?? "[]")
+            return Array.isArray(raw) ? raw : []     // for arrays
+          }} catch {{ return [] }}
+        }})()
+    For object shapes:
+        const stored = (() => {{
+          try {{
+            const raw = JSON.parse(localStorage.getItem("KEY") ?? "null")
+            return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {{}}
+          }} catch {{ return {{}} }}
+        }})()
+  * When the API may return a wrapper object like {{items: [...], total: ...}},
+    read the array explicitly: `const list = Array.isArray(res?.items) ? res.items : []`.
+  * At the TOP of any component that depends on fetched data, render a loading
+    state while isLoading is true. Never assume async data is defined or correctly
+    shaped on first render.
+  * If a context provider (CartProvider, AuthProvider, etc.) initializes from
+    localStorage, harden the read with the validators above — a stale payload
+    must not crash the whole app on mount.
+  This rule supersedes the previous, weaker version that used `(value ?? [])`.
   Example:
   // good:
   const {{ data: items = [], isLoading }} = useQuery({{...}})
   if (isLoading) return <Skeleton />
   const grouped = useMemo(() => CATEGORIES.map(c => ({{
-    name: c, items: (items ?? []).filter(i => i.category === c)
+    name: c, items: (Array.isArray(items) ? items : []).filter(i => i.category === c)
   }})), [items])
 
 **File-specific requirements (follow whichever applies to {file_to_gen.path}):**

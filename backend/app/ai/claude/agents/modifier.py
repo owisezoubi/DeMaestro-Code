@@ -22,6 +22,7 @@ class ModifierAgent:
         current_files: dict[str, str],
         plan: GenerationPlan,
         blueprint: BlueprintResponse,
+        structured_requirements=None,
     ) -> dict:
         """Identify which 1–5 files need to change and produce new content for each.
         Returns: { status, modified_files: {path: content}, summary, errors }
@@ -44,10 +45,19 @@ class ModifierAgent:
                 first_line = (content or "").split("\n", 1)[0][:100]
                 file_index.append(f"- {path}  ({len(content)} chars)  // {first_line}")
 
+        req_statements = "(omitted)"
+        if structured_requirements is not None:
+            stmts = [r.statement for r in (structured_requirements.user_requirements or [])]
+            if stmts:
+                req_statements = "\n".join(f"- {s}" for s in stmts)
+
         prompt = f"""You are modifying an existing generated app. The user has requested ONE change:
 
 USER REQUEST:
 {change_request}
+
+CURRENT REQUIREMENTS (treat as ground truth — your change MUST stay consistent):
+{req_statements}
 
 CURRENT FILE INDEX (path  | size | first-line summary):
 {chr(10).join(file_index)}

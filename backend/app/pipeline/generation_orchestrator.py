@@ -10,6 +10,7 @@ still packages the ZIP and sets status to ready_with_warnings so the user
 can inspect and fix the code themselves.
 """
 import json
+import re as _re
 import structlog
 
 from app.ai.claude.agents.architect import ArchitectAgent
@@ -27,6 +28,109 @@ from app.services import template_service
 log = structlog.get_logger("GenerationOrchestrator")
 
 _MAX_TEST_CYCLES = 10
+
+_TAILWIND_PALETTES: dict[str, dict[str, str]] = {
+    "blue":    {"50":"#EFF6FF","100":"#DBEAFE","200":"#BFDBFE","300":"#93C5FD",
+                "400":"#60A5FA","500":"#3B82F6","600":"#2563EB","700":"#1D4ED8","800":"#1E40AF","900":"#1E3A8A"},
+    "indigo":  {"50":"#EEF2FF","100":"#E0E7FF","200":"#C7D2FE","300":"#A5B4FC",
+                "400":"#818CF8","500":"#6366F1","600":"#4F46E5","700":"#4338CA","800":"#3730A3","900":"#312E81"},
+    "red":     {"50":"#FEF2F2","100":"#FEE2E2","200":"#FECACA","300":"#FCA5A5",
+                "400":"#F87171","500":"#EF4444","600":"#DC2626","700":"#B91C1C","800":"#991B1B","900":"#7F1D1D"},
+    "rose":    {"50":"#FFF1F2","100":"#FFE4E6","200":"#FECDD3","300":"#FDA4AF",
+                "400":"#FB7185","500":"#F43F5E","600":"#E11D48","700":"#BE123C","800":"#9F1239","900":"#881337"},
+    "green":   {"50":"#F0FDF4","100":"#DCFCE7","200":"#BBF7D0","300":"#86EFAC",
+                "400":"#4ADE80","500":"#22C55E","600":"#16A34A","700":"#15803D","800":"#166534","900":"#14532D"},
+    "emerald": {"50":"#ECFDF5","100":"#D1FAE5","200":"#A7F3D0","300":"#6EE7B7",
+                "400":"#34D399","500":"#10B981","600":"#059669","700":"#047857","800":"#065F46","900":"#064E3B"},
+    "amber":   {"50":"#FFFBEB","100":"#FEF3C7","200":"#FDE68A","300":"#FCD34D",
+                "400":"#FBBF24","500":"#F59E0B","600":"#D97706","700":"#B45309","800":"#92400E","900":"#78350F"},
+    "orange":  {"50":"#FFF7ED","100":"#FFEDD5","200":"#FED7AA","300":"#FDBA74",
+                "400":"#FB923C","500":"#F97316","600":"#EA580C","700":"#C2410C","800":"#9A3412","900":"#7C2D12"},
+    "purple":  {"50":"#FAF5FF","100":"#F3E8FF","200":"#E9D5FF","300":"#D8B4FE",
+                "400":"#C084FC","500":"#A855F7","600":"#9333EA","700":"#7E22CE","800":"#6B21A8","900":"#581C87"},
+    "pink":    {"50":"#FDF2F8","100":"#FCE7F3","200":"#FBCFE8","300":"#F9A8D4",
+                "400":"#F472B6","500":"#EC4899","600":"#DB2777","700":"#BE185D","800":"#9D174D","900":"#831843"},
+    "teal":    {"50":"#F0FDFA","100":"#CCFBF1","200":"#99F6E4","300":"#5EEAD4",
+                "400":"#2DD4BF","500":"#14B8A6","600":"#0D9488","700":"#0F766E","800":"#115E59","900":"#134E4A"},
+    "slate":   {"50":"#F8FAFC","100":"#F1F5F9","200":"#E2E8F0","300":"#CBD5E1",
+                "400":"#94A3B8","500":"#64748B","600":"#475569","700":"#334155","800":"#1E293B","900":"#0F172A"},
+    "navy":    {"50":"#F2F6FB","100":"#DBE5F1","200":"#B8CCE2","300":"#8BAAD0",
+                "400":"#5278A8","500":"#34588A","600":"#1F3A68","700":"#172C50","800":"#0F1E37","900":"#0A1428"},
+}
+
+_VIBE_KEYWORDS: dict[str, list[str]] = {
+    "minimalist":   ["minimalist", "minimal", "clean and simple", "spare", "uncluttered"],
+    "playful":      ["playful", "fun", "vibrant", "lively", "colorful"],
+    "professional": ["professional", "corporate", "business-like", "formal"],
+    "warm":         ["warm", "inviting", "cozy", "welcoming"],
+    "elegant":      ["elegant", "luxurious", "premium", "refined"],
+    "modern":       ["modern", "contemporary", "sleek"],
+}
+
+
+def _detect_design_brief(sr) -> dict:
+    """Scan the structured requirements for visual styling cues. Returns a dict
+    like {'primary_color': 'blue', 'vibe': 'minimalist', 'cues': [...]}."""
+    haystack_parts: list[str] = []
+    haystack_parts.append(sr.summary or "")
+    for r in sr.user_requirements:
+        haystack_parts.append(r.statement or "")
+        haystack_parts.append(r.rationale or "")
+    haystack = " ".join(haystack_parts).lower()
+
+    chosen_color: str | None = None
+    for color in _TAILWIND_PALETTES.keys():
+        if _re.search(rf"\b{color}\b\s+(?:color|theme|style|palette)", haystack):
+            chosen_color = color
+            break
+    if not chosen_color:
+        for color in _TAILWIND_PALETTES.keys():
+            if _re.search(rf"\b(in|with|using)\s+\w*\s*{color}\b", haystack) \
+               or _re.search(rf"\b{color}\b(?:\s+tones?|\s+and\s+\w+)", haystack):
+                chosen_color = color
+                break
+
+    chosen_vibe: str | None = None
+    for vibe, keys in _VIBE_KEYWORDS.items():
+        for k in keys:
+            if k in haystack:
+                chosen_vibe = vibe
+                break
+        if chosen_vibe:
+            break
+
+    return {
+        "primary_color": chosen_color,
+        "vibe": chosen_vibe,
+        "cues": [c for c in [chosen_color, chosen_vibe] if c],
+    }
+
+
+def _apply_design_brief_to_scaffolding(generated_files: dict, brief: dict) -> None:
+    """Mutate the seeded tailwind.config.js so the primary palette matches the
+    user-requested color. No-op when no color was detected."""
+    color = brief.get("primary_color")
+    if not color or color not in _TAILWIND_PALETTES:
+        return
+    path = "frontend/tailwind.config.js"
+    config = generated_files.get(path)
+    if not config:
+        return
+    palette = _TAILWIND_PALETTES[color]
+    new_block = "primary: {\n"
+    for k, v in palette.items():
+        new_block += f'          {k}: "{v}",\n'
+    new_block += "        },"
+    new_config, count = _re.subn(
+        r"primary:\s*\{[^{}]*\},",
+        new_block,
+        config,
+        count=1,
+        flags=_re.DOTALL,
+    )
+    if count > 0:
+        generated_files[path] = new_config
+        log.info("pipeline.design_brief_applied", color=color)
 
 
 class GenerationOrchestrator:
@@ -102,6 +206,22 @@ class GenerationOrchestrator:
                 except Exception as exc:
                     log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
 
+            design_brief = _detect_design_brief(sr)
+            if design_brief["cues"]:
+                _apply_design_brief_to_scaffolding(generated_files, design_brief)
+                brief_note = (
+                    "DESIGN BRIEF (apply consistently across every page): "
+                    f"primary color = {design_brief.get('primary_color') or 'default'}; "
+                    f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
+                    "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
+                    "for buttons, links, accents, and highlights — the primary palette has "
+                    "already been swapped to match the requested color."
+                )
+                try:
+                    plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
+                except Exception:
+                    pass
+
             for file_path in plan.generation_order:
                 file_to_gen = next((f for f in plan.files if f.path == file_path), None)
                 if file_to_gen is None:
@@ -111,7 +231,8 @@ class GenerationOrchestrator:
                     log.warning("generation.template_collision", file_path=file_path)
                     continue
                 content = self.generator.generate_file(
-                    file_to_gen, plan, blueprint, generated_files
+                    file_to_gen, plan, blueprint, generated_files,
+                    structured_requirements=sr,
                 )
                 generated_files[file_path] = content
 
@@ -207,6 +328,22 @@ class GenerationOrchestrator:
                 except Exception as exc:
                     log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
 
+            design_brief = _detect_design_brief(sr)
+            if design_brief["cues"]:
+                _apply_design_brief_to_scaffolding(generated_files, design_brief)
+                brief_note = (
+                    "DESIGN BRIEF (apply consistently across every page): "
+                    f"primary color = {design_brief.get('primary_color') or 'default'}; "
+                    f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
+                    "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
+                    "for buttons, links, accents, and highlights — the primary palette has "
+                    "already been swapped to match the requested color."
+                )
+                try:
+                    plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
+                except Exception:
+                    pass
+
             app_files = [f for f in plan.files if f.path not in scaffolding]
             total = len(scaffolding) + len(app_files)
 
@@ -228,7 +365,8 @@ class GenerationOrchestrator:
                     "generated_count": len(scaffolding) + idx,
                 })
                 generated_files[file_path] = self.generator.generate_file(
-                    file_to_gen, plan, blueprint, generated_files
+                    file_to_gen, plan, blueprint, generated_files,
+                    structured_requirements=sr,
                 )
 
             firestore_service.update_project(uid, project_id, {

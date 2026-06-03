@@ -244,6 +244,14 @@ Capture verbatim if the user named technologies. Null otherwise. Do not infer or
 ## ambiguities
 See Ambiguity Rules above. Maximum 3. All must have `suggested_options`.
 
+# Other notes
+
+- If the user mentions a color preference, style vibe, or visual feel ("blue
+  colors", "minimalist", "warm and inviting"), preserve that wording verbatim in
+  the relevant `user_requirement` statement so downstream stages can act on it.
+  Do not paraphrase the color away (e.g. don't replace "blue" with "branded" or
+  "modern").
+
 # Non-Negotiable Output Rules
 
 1. Output ONLY the JSON object. No text before or after it.

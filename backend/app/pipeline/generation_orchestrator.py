@@ -21,6 +21,7 @@ from app.ai.claude.agents.generator import GeneratorAgent
 from app.ai.claude.agents.tester import TesterAgent
 from app.ai.claude.agents.verifier import VerifierAgent
 from app.ai.gemini.agents.blueprint import BlueprintResponse
+from app.models.generation_plan import GenerationPlan
 from app.models.project import ProjectStatus
 from app.services import firestore_service
 from app.services import template_service
@@ -80,15 +81,24 @@ def _detect_design_brief(sr) -> dict:
 
     chosen_color: str | None = None
     for color in _TAILWIND_PALETTES.keys():
-        if _re.search(rf"\b{color}\b\s+(?:color|theme|style|palette)", haystack):
-            chosen_color = color
-            break
-    if not chosen_color:
-        for color in _TAILWIND_PALETTES.keys():
-            if _re.search(rf"\b(in|with|using)\s+\w*\s*{color}\b", haystack) \
-               or _re.search(rf"\b{color}\b(?:\s+tones?|\s+and\s+\w+)", haystack):
+        # Any standalone mention of the color word that is reasonably close to
+        # a style cue ("color", "theme", "palette", "tones", "style", "look",
+        # "scheme", "shade") — or just a strong standalone mention.
+        patterns = [
+            rf"\b{color}\b\s+(?:and|with)\s+(?:white|black|gray|slate|cream|beige)",
+            rf"(?:white|black|gray|slate|cream|beige)\s+(?:and|with)\s+\b{color}\b",
+            rf"\b{color}\s+(?:colors?|theme|themes|palette|tones?|style|scheme|shade|hue|accent)",
+            rf"\b(?:color|theme|palette|scheme|accent)\s+(?:is|of|in)?\s*\b{color}\b",
+            rf"\b(?:in|with|using|prefer|like|want|go\s+with|styled?\s+in|use)\s+\w*\s*\b{color}\b",
+            rf"\b(?:website|site|app|page|design|background)\s+(?:in|with)\s+\b{color}\b",
+            rf"\b{color}\b\s+(?:website|site|app|page|design|background|UI|ui)",
+        ]
+        for pat in patterns:
+            if _re.search(pat, haystack):
                 chosen_color = color
                 break
+        if chosen_color:
+            break
 
     chosen_vibe: str | None = None
     for vibe, keys in _VIBE_KEYWORDS.items():
@@ -104,6 +114,69 @@ def _detect_design_brief(sr) -> dict:
         "vibe": chosen_vibe,
         "cues": [c for c in [chosen_color, chosen_vibe] if c],
     }
+
+
+_BAD_COLOR_PATTERNS = [
+    # bg-slate-800/900 without a paired text-slate-100/white/primary
+    (_re.compile(r'className="[^"]*\bbg-slate-(?:8|9)\d\d\b(?:(?!text-(?:slate-[1-2]|white|primary))[^"])*"'),
+     "bg-slate-{800-900} without text-slate-100/200/white/primary — text invisible"),
+    # dark:bg without dark:text
+    (_re.compile(r'className="[^"]*\bdark:bg-(?:slate|gray)-(?:8|9)\d\d\b(?:(?!dark:text-)[^"])*"'),
+     "dark:bg-{slate|gray}-{800-900} without dark:text-X — text invisible in dark mode"),
+    # bare text-slate-800/900 with no dark: variant — invisible on dark backgrounds
+    (_re.compile(r'className="[^"]*\btext-slate-(?:8|9)\d\d\b(?:(?!dark:text-)[^"])*"'),
+     "text-slate-{800-900} without dark:text-X — text invisible on dark surfaces, use text-default"),
+    # bg-white text-white
+    (_re.compile(r'className="[^"]*\bbg-white\b[^"]*\btext-white\b[^"]*"'),
+     "bg-white text-white — text invisible"),
+    # bg-slate-900 text-slate-900 (same-shade dead text)
+    (_re.compile(r'className="[^"]*\bbg-slate-900\b[^"]*\btext-slate-900\b[^"]*"'),
+     "bg-slate-900 text-slate-900 — text invisible (same shade)"),
+    # text-slate-600 on dark backgrounds (dark:text-slate-600 is too dim)
+    (_re.compile(r'className="[^"]*\bdark:text-slate-(?:5|6)\d\d\b[^"]*\bdark:bg-slate-(?:8|9)\d\d\b[^"]*"'),
+     "dark:text-slate-{500-600} on dark:bg-slate-{800-900} — low contrast in dark mode"),
+    # Hardcoded accent colors (break palette swap)
+    (_re.compile(r'className="[^"]*\b(?:bg|text|border|ring)-(?:blue|red|emerald|orange|purple|pink|cyan)-(?:5|6|7)\d\d\b[^"]*"'),
+     "Hardcoded accent color — use primary-* instead so palette swap works"),
+    # text-primary-300 or lighter on light backgrounds (too faint)
+    (_re.compile(r'className="[^"]*\btext-primary-[123]\d\d\b(?:(?!dark:)[^"])*"'),
+     "text-primary-{100-300} without dark: qualifier — too light for body text on white"),
+]
+
+
+_BAD_THEME_PATTERN = _re.compile(
+    r'(ThemeContext|ThemeProvider)[\s\S]+useEffect[\s\S]+localStorage\.setItem[\s\S]+\}\s*,\s*\[theme\]'
+)
+
+
+def _scan_color_violations(generated_files: dict) -> list:
+    """Return a list of 'FILE:LINE problem' strings for color combos that will
+    make the UI broken in dark mode or break the palette swap."""
+    violations = []
+    for path, content in generated_files.items():
+        if not (path.endswith(".jsx") or path.endswith(".tsx")):
+            continue
+        for i, line in enumerate((content or "").splitlines(), 1):
+            for pat, msg in _BAD_COLOR_PATTERNS:
+                if pat.search(line):
+                    violations.append(f"{path}:{i} — {msg}")
+                    break
+    for path, content in generated_files.items():
+        if not (path.endswith(".jsx") or path.endswith(".js") or path.endswith(".tsx")):
+            continue
+        if "ThemeContext" in path or "ThemeProvider" in path or "theme" in path.lower():
+            c = content or ""
+            if "useEffect" in c and "documentElement" not in c:
+                violations.append(
+                    f"{path}:0 — ThemeContext useEffect missing documentElement.classList toggle "
+                    "(dark mode will not visually apply)"
+                )
+            if "localStorage.setItem" in c and "classList" not in c:
+                violations.append(
+                    f"{path}:0 — ThemeContext writes to localStorage but never toggles "
+                    "document.documentElement.classList — dark: variants stay inactive"
+                )
+    return violations
 
 
 def _apply_design_brief_to_scaffolding(generated_files: dict, brief: dict) -> None:
@@ -165,78 +238,116 @@ class GenerationOrchestrator:
                 raise ValueError(f"No blueprint for project {project_id}")
             blueprint = BlueprintResponse(**blueprint_dict)
 
-            plan = self.architect.architect(sr, blueprint)
-            log.info("generation.architect.done", project_id=project_id, num_files=len(plan.files))
-
-            app_slug = template_service.slugify(sr.app_name)
-            scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
-            generated_files: dict[str, str] = dict(scaffolding)
-            log.info("generation.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
-
-            extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
-            if extras:
-                req_path = "backend/requirements.txt"
-                base_req = generated_files.get(req_path, "")
-                present = base_req.lower()
-                to_add = [
-                    d for d in extras
-                    if d.split("==")[0].split(">")[0].split("<")[0].strip().lower() not in present
-                ]
-                if to_add:
-                    generated_files[req_path] = (
-                        base_req.rstrip()
-                        + "\n# --- app-specific dependencies (declared by the architect) ---\n"
-                        + "\n".join(to_add) + "\n"
-                    )
-                    log.info("pipeline.extra_deps_added", project_id=project_id, deps=to_add)
-
-            fe_extras = [d.strip() for d in (plan.extra_frontend_dependencies or []) if d and d.strip()]
-            if fe_extras:
-                pkg_path = "frontend/package.json"
-                pkg_raw = generated_files.get(pkg_path, "")
-                try:
-                    pkg = json.loads(pkg_raw)
-                    deps = pkg.setdefault("dependencies", {})
-                    added = [name for name in fe_extras if name not in deps]
-                    for name in added:
-                        deps[name] = "latest"
-                    if added:
-                        generated_files[pkg_path] = json.dumps(pkg, indent=2) + "\n"
-                        log.info("pipeline.extra_frontend_deps_added", project_id=project_id, deps=added)
-                except Exception as exc:
-                    log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
-
-            design_brief = _detect_design_brief(sr)
-            if design_brief["cues"]:
-                _apply_design_brief_to_scaffolding(generated_files, design_brief)
-                brief_note = (
-                    "DESIGN BRIEF (apply consistently across every page): "
-                    f"primary color = {design_brief.get('primary_color') or 'default'}; "
-                    f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
-                    "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
-                    "for buttons, links, accents, and highlights — the primary palette has "
-                    "already been swapped to match the requested color."
+            existing_plan = project.generation_plan or None
+            existing_files = project.generated_files or {}
+            resuming = bool(existing_plan and existing_files)
+            if resuming:
+                log.info(
+                    "pipeline.resuming",
+                    project_id=project_id,
+                    files_already_generated=len(existing_files),
                 )
-                try:
-                    plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
-                except Exception:
-                    pass
+
+            if resuming:
+                plan = GenerationPlan(**existing_plan)
+                generated_files: dict[str, str] = dict(existing_files)
+            else:
+                plan = self.architect.architect(sr, blueprint)
+                log.info("generation.architect.done", project_id=project_id, num_files=len(plan.files))
+
+                firestore_service.update_project(uid, project_id, {
+                    "generation_plan": plan.model_dump(),
+                })
+
+                app_slug = template_service.slugify(sr.app_name)
+                scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
+                generated_files = dict(scaffolding)
+                log.info("generation.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
+
+                extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
+                if extras:
+                    req_path = "backend/requirements.txt"
+                    base_req = generated_files.get(req_path, "")
+                    present = base_req.lower()
+                    to_add = [
+                        d for d in extras
+                        if d.split("==")[0].split(">")[0].split("<")[0].strip().lower() not in present
+                    ]
+                    if to_add:
+                        generated_files[req_path] = (
+                            base_req.rstrip()
+                            + "\n# --- app-specific dependencies (declared by the architect) ---\n"
+                            + "\n".join(to_add) + "\n"
+                        )
+                        log.info("pipeline.extra_deps_added", project_id=project_id, deps=to_add)
+
+                fe_extras = [d.strip() for d in (plan.extra_frontend_dependencies or []) if d and d.strip()]
+                if fe_extras:
+                    pkg_path = "frontend/package.json"
+                    pkg_raw = generated_files.get(pkg_path, "")
+                    try:
+                        pkg = json.loads(pkg_raw)
+                        deps = pkg.setdefault("dependencies", {})
+                        added = [name for name in fe_extras if name not in deps]
+                        for name in added:
+                            deps[name] = "latest"
+                        if added:
+                            generated_files[pkg_path] = json.dumps(pkg, indent=2) + "\n"
+                            log.info("pipeline.extra_frontend_deps_added", project_id=project_id, deps=added)
+                    except Exception as exc:
+                        log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
+
+                design_brief = _detect_design_brief(sr)
+                if design_brief["cues"]:
+                    _apply_design_brief_to_scaffolding(generated_files, design_brief)
+                    brief_note = (
+                        "DESIGN BRIEF (apply consistently across every page): "
+                        f"primary color = {design_brief.get('primary_color') or 'default'}; "
+                        f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
+                        "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
+                        "for buttons, links, accents, and highlights — the primary palette has "
+                        "already been swapped to match the requested color."
+                    )
+                    try:
+                        plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
+                    except Exception:
+                        pass
+
+                firestore_service.update_project(uid, project_id, {
+                    "generated_files": generated_files,
+                })
 
             for file_path in plan.generation_order:
+                if file_path in generated_files:
+                    continue
                 file_to_gen = next((f for f in plan.files if f.path == file_path), None)
                 if file_to_gen is None:
                     log.warning("generation.file_not_in_plan", file_path=file_path)
-                    continue
-                if file_path in scaffolding:
-                    log.warning("generation.template_collision", file_path=file_path)
                     continue
                 content = self.generator.generate_file(
                     file_to_gen, plan, blueprint, generated_files,
                     structured_requirements=sr,
                 )
                 generated_files[file_path] = content
+                firestore_service.update_project(uid, project_id, {
+                    "generated_files": generated_files,
+                })
 
             log.info("generation.generate.done", project_id=project_id, num_files=len(generated_files))
+
+            violations = _scan_color_violations(generated_files)
+            if violations:
+                log.warning(
+                    "pipeline.color_violations",
+                    project_id=project_id,
+                    count=len(violations),
+                    sample=violations[:5],
+                )
+                plan.notes = (plan.notes or "") + (
+                    "\n\nCOLOR DISCIPLINE VIOLATIONS (fix in generated files — use semantic "
+                    "classes from index.css instead of bare bg-slate / hardcoded accent colors):\n"
+                    + "\n".join(f"- {v}" for v in violations[:20])
+                )
 
             firestore_service.update_project(uid, project_id, {
                 "generated_files": generated_files,
@@ -284,99 +395,136 @@ class GenerationOrchestrator:
                 raise ValueError(f"No blueprint for project {project_id}")
             blueprint = BlueprintResponse(**blueprint_dict)
 
-            # ── STEP 1: Architect + Generate ─────────────────────────────────
-            firestore_service.set_project_status(uid, project_id, ProjectStatus.generating)
-
-            plan = self.architect.architect(sr, blueprint)
-            log.info("pipeline.architect.done", project_id=project_id, num_files=len(plan.files))
-
-            app_slug = template_service.slugify(sr.app_name)
-            scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
-            generated_files: dict[str, str] = dict(scaffolding)
-            log.info("pipeline.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
-
-            extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
-            if extras:
-                req_path = "backend/requirements.txt"
-                base_req = generated_files.get(req_path, "")
-                present = base_req.lower()
-                to_add = [
-                    d for d in extras
-                    if d.split("==")[0].split(">")[0].split("<")[0].strip().lower() not in present
-                ]
-                if to_add:
-                    generated_files[req_path] = (
-                        base_req.rstrip()
-                        + "\n# --- app-specific dependencies (declared by the architect) ---\n"
-                        + "\n".join(to_add) + "\n"
-                    )
-                    log.info("pipeline.extra_deps_added", project_id=project_id, deps=to_add)
-
-            fe_extras = [d.strip() for d in (plan.extra_frontend_dependencies or []) if d and d.strip()]
-            if fe_extras:
-                pkg_path = "frontend/package.json"
-                pkg_raw = generated_files.get(pkg_path, "")
-                try:
-                    pkg = json.loads(pkg_raw)
-                    deps = pkg.setdefault("dependencies", {})
-                    added = [name for name in fe_extras if name not in deps]
-                    for name in added:
-                        deps[name] = "latest"
-                    if added:
-                        generated_files[pkg_path] = json.dumps(pkg, indent=2) + "\n"
-                        log.info("pipeline.extra_frontend_deps_added", project_id=project_id, deps=added)
-                except Exception as exc:
-                    log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
-
-            design_brief = _detect_design_brief(sr)
-            if design_brief["cues"]:
-                _apply_design_brief_to_scaffolding(generated_files, design_brief)
-                brief_note = (
-                    "DESIGN BRIEF (apply consistently across every page): "
-                    f"primary color = {design_brief.get('primary_color') or 'default'}; "
-                    f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
-                    "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
-                    "for buttons, links, accents, and highlights — the primary palette has "
-                    "already been swapped to match the requested color."
+            existing_plan = project.generation_plan or None
+            existing_files = project.generated_files or {}
+            resuming = bool(existing_plan and existing_files)
+            if resuming:
+                log.info(
+                    "pipeline.resuming",
+                    project_id=project_id,
+                    files_already_generated=len(existing_files),
                 )
-                try:
-                    plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
-                except Exception:
-                    pass
 
-            app_files = [f for f in plan.files if f.path not in scaffolding]
-            total = len(scaffolding) + len(app_files)
+            # ── STEP 1: Architect + Generate ─────────────────────────────────
+            if resuming:
+                plan = GenerationPlan(**existing_plan)
+                generated_files: dict[str, str] = dict(existing_files)
+            else:
+                firestore_service.set_project_status(uid, project_id, ProjectStatus.generating)
+                plan = self.architect.architect(sr, blueprint)
+                log.info("pipeline.architect.done", project_id=project_id, num_files=len(plan.files))
+
+                firestore_service.update_project(uid, project_id, {
+                    "generation_plan": plan.model_dump(),
+                })
+
+                app_slug = template_service.slugify(sr.app_name)
+                scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
+                generated_files = dict(scaffolding)
+                log.info("pipeline.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
+
+                extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
+                if extras:
+                    req_path = "backend/requirements.txt"
+                    base_req = generated_files.get(req_path, "")
+                    present = base_req.lower()
+                    to_add = [
+                        d for d in extras
+                        if d.split("==")[0].split(">")[0].split("<")[0].strip().lower() not in present
+                    ]
+                    if to_add:
+                        generated_files[req_path] = (
+                            base_req.rstrip()
+                            + "\n# --- app-specific dependencies (declared by the architect) ---\n"
+                            + "\n".join(to_add) + "\n"
+                        )
+                        log.info("pipeline.extra_deps_added", project_id=project_id, deps=to_add)
+
+                fe_extras = [d.strip() for d in (plan.extra_frontend_dependencies or []) if d and d.strip()]
+                if fe_extras:
+                    pkg_path = "frontend/package.json"
+                    pkg_raw = generated_files.get(pkg_path, "")
+                    try:
+                        pkg = json.loads(pkg_raw)
+                        deps = pkg.setdefault("dependencies", {})
+                        added = [name for name in fe_extras if name not in deps]
+                        for name in added:
+                            deps[name] = "latest"
+                        if added:
+                            generated_files[pkg_path] = json.dumps(pkg, indent=2) + "\n"
+                            log.info("pipeline.extra_frontend_deps_added", project_id=project_id, deps=added)
+                    except Exception as exc:
+                        log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
+
+                design_brief = _detect_design_brief(sr)
+                if design_brief["cues"]:
+                    _apply_design_brief_to_scaffolding(generated_files, design_brief)
+                    brief_note = (
+                        "DESIGN BRIEF (apply consistently across every page): "
+                        f"primary color = {design_brief.get('primary_color') or 'default'}; "
+                        f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
+                        "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
+                        "for buttons, links, accents, and highlights — the primary palette has "
+                        "already been swapped to match the requested color."
+                    )
+                    try:
+                        plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
+                    except Exception:
+                        pass
+
+                firestore_service.update_project(uid, project_id, {
+                    "generated_files": generated_files,
+                })
+
+            app_files = [f for f in plan.files if f.path not in generated_files]
+            already_done = len(generated_files)
+            total = already_done + len(app_files)
 
             firestore_service.update_project(uid, project_id, {
                 "total_files": total,
-                "generated_count": len(scaffolding),
+                "generated_count": already_done,
                 "current_stage": "generating",
             })
 
             for idx, file_path in enumerate(plan.generation_order):
+                if file_path in generated_files:
+                    continue
                 file_to_gen = next((f for f in plan.files if f.path == file_path), None)
                 if file_to_gen is None:
                     continue
-                if file_path in scaffolding:
-                    log.warning("pipeline.template_collision", file_path=file_path)
-                    continue
                 firestore_service.update_project(uid, project_id, {
                     "current_file": file_path,
-                    "generated_count": len(scaffolding) + idx,
+                    "generated_count": len(generated_files),
                 })
                 generated_files[file_path] = self.generator.generate_file(
                     file_to_gen, plan, blueprint, generated_files,
                     structured_requirements=sr,
                 )
+                firestore_service.update_project(uid, project_id, {
+                    "generated_files": generated_files,
+                })
 
             firestore_service.update_project(uid, project_id, {
-                "generated_files": generated_files,
                 "generation_plan": plan.model_dump(),
                 "status": ProjectStatus.generated,
                 "generated_count": len(generated_files),
                 "current_file": None,
             })
             log.info("pipeline.generate.done", project_id=project_id, num_files=len(generated_files))
+
+            violations = _scan_color_violations(generated_files)
+            if violations:
+                log.warning(
+                    "pipeline.color_violations",
+                    project_id=project_id,
+                    count=len(violations),
+                    sample=violations[:5],
+                )
+                plan.notes = (plan.notes or "") + (
+                    "\n\nCOLOR DISCIPLINE VIOLATIONS (fix in generated files — use semantic "
+                    "classes from index.css instead of bare bg-slate / hardcoded accent colors):\n"
+                    + "\n".join(f"- {v}" for v in violations[:20])
+                )
 
             # ── STEP 2: Test + Debug loop ────────────────────────────────────
             attempt_count: dict[str, int] = {}
@@ -477,11 +625,48 @@ class GenerationOrchestrator:
                     )
                     break  # test_passed stays False → best_effort block below
 
-            # Best-effort: always package the ZIP even if tests never passed.
+            # Identify which failed checks are environmental vs real code/contract bugs.
+            final_checks = (test_results or {}).get("passed_checks", {}) or {}
+            real_failures = {
+                check for check, st in final_checks.items()
+                if st == "failed" and check not in ("smoke", "typecheck")
+            }
+            environmental_skips = {
+                check for check, st in final_checks.items() if st == "skipped"
+            }
+
+            if not test_passed and real_failures:
+                # STRICT: real failures that couldn't be auto-fixed — mark FAILED, no ZIP.
+                error_msg = (
+                    f"Generation failed: {', '.join(sorted(real_failures))} did not pass "
+                    "after debug attempts. No ZIP packaged — please review the requirements "
+                    "or click Retry to start a fresh generation."
+                )
+                log.error(
+                    "pipeline.strict_failure",
+                    project_id=project_id,
+                    real_failures=sorted(real_failures),
+                    environmental_skips=sorted(environmental_skips),
+                )
+                firestore_service.update_project(uid, project_id, {
+                    "status": ProjectStatus.failed,
+                    "current_stage": "generating",
+                    "error_message": error_msg,
+                    "last_failed_checks": sorted(real_failures),
+                    "test_error_log": ("\n".join(test_results.get("errors", []) or []))[:5000],
+                })
+                return {
+                    "status": "error",
+                    "zip_url": None,
+                    "generated_files": generated_files,
+                    "errors": [error_msg],
+                }
+
+            # OK to package: tests passed, or only environmental skips/warnings remain.
             if not test_passed:
                 best_effort = True
                 _test_summary = ", ".join(
-                    f"{c}: {s}" for c, s in test_results.get("passed_checks", {}).items()
+                    f"{c}: {s}" for c, s in final_checks.items()
                 )
                 warning_msg = (
                     "The generated code did not pass automated tests in our environment"
@@ -489,16 +674,10 @@ class GenerationOrchestrator:
                     + ". You can still download the ZIP — the code may "
                     "need small manual fixes to run locally. Check the README for setup."
                 )
-                _test_error_log = ("\n".join(test_results.get("errors", [])))[:5000] or None
-                log.warning(
-                    "pipeline.tests_failed_packaging_anyway",
-                    project_id=project_id,
-                    error=warning_msg,
-                )
                 firestore_service.update_project(uid, project_id, {
                     "generated_files": generated_files,
                     "last_error": warning_msg,
-                    "test_error_log": _test_error_log,
+                    "test_error_log": ("\n".join(test_results.get("errors", [])))[:5000] or None,
                 })
             else:
                 firestore_service.update_project(uid, project_id, {

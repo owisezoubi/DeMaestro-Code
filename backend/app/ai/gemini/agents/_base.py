@@ -68,6 +68,7 @@ class GeminiAgent(ABC):
             generation_config=genai.types.GenerationConfig(
                 temperature=self.temperature,
                 response_mime_type="application/json",
+                max_output_tokens=32768,
             ),
             system_instruction=system_prompt,
         )
@@ -91,6 +92,19 @@ class GeminiAgent(ABC):
                 tokens_out=tokens_out,
                 duration_ms=duration_ms,
             )
+
+            finish_reason = None
+            try:
+                finish_reason = response.candidates[0].finish_reason.name
+            except Exception:
+                pass
+            if finish_reason == "MAX_TOKENS":
+                self.log.warning(
+                    "gemini.truncated_at_max_tokens",
+                    agent=self.agent_name,
+                    stage=stage,
+                    response_chars=len(response.text),
+                )
 
             try:
                 raw = json.loads(response.text)
@@ -140,6 +154,7 @@ class GeminiAgent(ABC):
             model_name=model_name,
             generation_config=genai.types.GenerationConfig(
                 temperature=self.temperature,
+                max_output_tokens=32768,
             ),
             system_instruction=system_prompt,
         )
@@ -163,6 +178,20 @@ class GeminiAgent(ABC):
                 tokens_out=tokens_out,
                 duration_ms=duration_ms,
             )
+
+            finish_reason = None
+            try:
+                finish_reason = response.candidates[0].finish_reason.name
+            except Exception:
+                pass
+            if finish_reason == "MAX_TOKENS":
+                self.log.warning(
+                    "gemini.truncated_at_max_tokens",
+                    agent=self.agent_name,
+                    stage=stage,
+                    response_chars=len(response.text),
+                )
+
             return response.text
         except Exception as exc:
             self.log.error(

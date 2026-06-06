@@ -1,5 +1,6 @@
 @echo off
-if not exist backend\.venv ( echo Run setup.bat first. & exit /b 1 )
-if not exist frontend\node_modules ( echo Run setup.bat first. & exit /b 1 )
-start "Backend"  cmd /k "cd backend && .venv\Scripts\uvicorn.exe app.main:app --reload --port 8000"
-start "Frontend" cmd /k "cd frontend && npm run dev"
+setlocal
+if not defined BACKEND_PORT set BACKEND_PORT=8100
+if not defined VITE_PORT set VITE_PORT=5273
+start "backend" cmd /c "cd backend && .venv\Scripts\uvicorn app.main:app --reload --port %BACKEND_PORT%"
+start "frontend" cmd /c "cd frontend && npm run dev -- --port %VITE_PORT%"

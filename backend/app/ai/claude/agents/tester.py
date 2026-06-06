@@ -2,9 +2,11 @@
 import ast
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +29,27 @@ _BOOT_FAILURE_PATTERNS = [
     "TypeError:",
     "NameError:",
 ]
+
+
+_FRONTEND_API_CALL_RE = re.compile(
+    r'\b(?:api|axios)\.(?P<method>get|post|put|patch|delete)\s*\(\s*["\'](?P<path>/[^"\']+)["\']',
+    re.IGNORECASE,
+)
+
+
+def _extract_backend_routes_from_openapi(schema: dict) -> set[tuple[str, str]]:
+    """Pull (METHOD, /path) tuples from a fetched openapi.json.
+
+    FastAPI's own route table — guaranteed to match what the running app serves.
+    """
+    routes: set[tuple[str, str]] = set()
+    if not schema:
+        return routes
+    for path, methods in (schema.get("paths") or {}).items():
+        for method, _spec in (methods or {}).items():
+            if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                routes.add((method.upper(), path.rstrip("/") or "/"))
+    return routes
 
 
 def _stderr_has_exception(stderr: str) -> bool:
@@ -78,6 +101,9 @@ class TesterAgent:
     In real mode: runs subprocess commands in the discovered backend/frontend dirs.
     """
 
+    def __init__(self) -> None:
+        self._last_openapi_schema: Optional[dict] = None
+
     def run_tests(self, generated_files: dict[str, str], plan: GenerationPlan) -> dict:
         """Run full test suite (install / lint / typecheck / boot).
 
@@ -88,24 +114,43 @@ class TesterAgent:
         log.info("test.start", num_files=len(generated_files), stack=plan.technology_stack)
 
         if settings.mock_ai:
-            return self._test_mock(generated_files, plan)
+            result = self._test_mock(generated_files, plan)
+        else:
+            try:
+                project_dir = self._write_files_to_temp(generated_files)
+                result = self._test_real(project_dir, plan.technology_stack)
+            except Exception as e:
+                log.error("test.error", error=str(e))
+                result = {
+                    "status": "error",
+                    "errors": [str(e)],
+                    "logs": {},
+                    "passed_checks": {
+                        "install": "failed",
+                        "lint": "failed",
+                        "typecheck": "failed",
+                        "boot": "failed",
+                    },
+                }
 
-        try:
-            project_dir = self._write_files_to_temp(generated_files)
-            return self._test_real(project_dir, plan.technology_stack)
-        except Exception as e:
-            log.error("test.error", error=str(e))
-            return {
-                "status": "error",
-                "errors": [str(e)],
-                "logs": {},
-                "passed_checks": {
-                    "install": "failed",
-                    "lint": "failed",
-                    "typecheck": "failed",
-                    "boot": "failed",
-                },
-            }
+        # Contract check — uses the OpenAPI schema fetched from the running backend.
+        # Skipped in mock mode and when boot failed (no schema captured).
+        contract_status, contract_data = self._contract_check(
+            generated_files, self._last_openapi_schema
+        )
+        if contract_status == "failed":
+            for miss in contract_data:
+                log.warning("contract_check.miss", miss=miss)
+            result["errors"].extend(contract_data)
+            result["passed_checks"]["contract"] = "failed"
+            result["logs"]["contract"] = "; ".join(contract_data)
+            result["status"] = "failed"
+        else:
+            result["passed_checks"]["contract"] = contract_status  # "passed" or "skipped"
+            if contract_status == "skipped":
+                result["logs"]["contract"] = contract_data
+
+        return result
 
     # ── mock path ────────────────────────────────────────────────────────────
 
@@ -440,6 +485,27 @@ class TesterAgent:
                 except Exception:
                     pass
             except subprocess.TimeoutExpired:
+                # Backend is running — grab the real route table from FastAPI before shutdown.
+                # Retry up to 15 times to handle the race where FastAPI is still starting.
+                openapi_schema = None
+                for attempt in range(15):
+                    try:
+                        import urllib.request
+                        with urllib.request.urlopen(
+                            "http://localhost:8001/openapi.json", timeout=2,
+                        ) as resp:
+                            openapi_schema = json.loads(resp.read().decode("utf-8"))
+                        log.info("test_boot.openapi_fetched",
+                                 paths=len(openapi_schema.get("paths", {})),
+                                 attempts=attempt + 1)
+                        break
+                    except Exception:
+                        import time
+                        time.sleep(1)
+                if openapi_schema is None:
+                    log.warning("test_boot.openapi_fetch_failed_after_retries")
+                self._last_openapi_schema = openapi_schema
+
                 proc.terminate()
                 try:
                     out, err = proc.communicate(timeout=2)
@@ -596,3 +662,137 @@ try {
                 preview.wait(timeout=5)
             except Exception:
                 preview.kill()
+
+    # ── contract checks ───────────────────────────────────────────────────────
+
+    def _extract_backend_routes(self, generated_files: dict[str, str]) -> dict:
+        """Scan backend Python files; return paths where OAuth2PasswordRequestForm is used."""
+        oauth2_paths: set[str] = set()
+        for path, content in generated_files.items():
+            if not path.endswith(".py") or "OAuth2PasswordRequestForm" not in content:
+                continue
+            for m in re.finditer(r'@(?:router|app)\.post\(["\']([^"\']+)["\']', content):
+                oauth2_paths.add(m.group(1))
+            if not oauth2_paths:
+                oauth2_paths.add("__any_auth__")
+        return {"oauth2_paths": oauth2_paths}
+
+    def _extract_frontend_calls(self, generated_files: dict[str, str]) -> list[dict]:
+        """Scan frontend files for POST calls to auth-shaped paths."""
+        calls: list[dict] = []
+        auth_path_re = re.compile(r'/(?:login|signin|register|signup)\b', re.IGNORECASE)
+        for path, content in generated_files.items():
+            if not any(path.endswith(ext) for ext in (".jsx", ".tsx", ".js", ".ts")):
+                continue
+            lines = content.split("\n")
+            for i, line in enumerate(lines):
+                if "post(" not in line.lower() and "POST" not in line:
+                    continue
+                url_m = re.search(r'''[`'"](/[^`'"]+)[`'"]''', line)
+                if not url_m:
+                    continue
+                post_path = url_m.group(1)
+                if not auth_path_re.search(post_path):
+                    continue
+                ctx = "\n".join(lines[max(0, i - 5):min(len(lines), i + 10)])
+                is_form = "URLSearchParams" in ctx or "FormData" in ctx
+                calls.append({
+                    "file": path,
+                    "post_path": post_path,
+                    "is_form_encoded": is_form,
+                    "is_json": not is_form,
+                })
+        return calls
+
+    def _extract_all_frontend_api_calls(self, generated_files: dict[str, str]) -> list[tuple[str, str]]:
+        """Build deduplicated (METHOD, path) list from all frontend files (static string paths only)."""
+        calls: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for path, content in generated_files.items():
+            if not any(path.endswith(ext) for ext in (".jsx", ".tsx", ".js", ".ts")):
+                continue
+            if path.endswith("/api.js") or path.endswith("/api.ts"):
+                continue
+            for m in _FRONTEND_API_CALL_RE.finditer(content or ""):
+                method = m.group("method").upper()
+                route_path = m.group("path")
+                key = (method, route_path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                calls.append(key)
+        return calls
+
+    def _contract_check(
+        self,
+        generated_files: dict[str, str],
+        openapi_schema: Optional[dict],
+    ) -> tuple[str, list | str]:
+        """Return (status, data).
+
+        status is 'passed', 'failed', or 'skipped'.
+        data is a list of CONTRACT MISS strings when failed, or a reason string when skipped.
+        """
+        if not openapi_schema:
+            return ("skipped", "no openapi schema available (boot may have failed)")
+
+        misses: list[str] = []
+
+        # ── AUTH-SHAPE check ────────────────────────────────────────────────
+        backend = self._extract_backend_routes(generated_files)
+        frontend = self._extract_frontend_calls(generated_files)
+        oauth2_paths = backend.get("oauth2_paths", set())
+        if oauth2_paths and frontend:
+            for call in frontend:
+                if not call.get("is_json"):
+                    continue
+                post_path = call.get("post_path", "")
+                path_matched = any(
+                    post_path.endswith(op) or op == "__any_auth__"
+                    for op in oauth2_paths
+                )
+                if path_matched:
+                    misses.append(
+                        f"CONTRACT MISS: AUTH-SHAPE POST {post_path}   "
+                        "backend expects form-encoded username+password "
+                        "(OAuth2PasswordRequestForm), frontend sends JSON. "
+                        "suggestions: convert to URLSearchParams"
+                    )
+
+        # ── METHOD-MISMATCH check (OpenAPI ground-truth) ────────────────────
+        backend_routes = _extract_backend_routes_from_openapi(openapi_schema)
+        backend_paths_by_method: dict[str, set[str]] = {}
+        for bmethod, bpath in backend_routes:
+            backend_paths_by_method.setdefault(bmethod, set()).add(bpath)
+
+        frontend_calls = self._extract_all_frontend_api_calls(generated_files)
+        if backend_paths_by_method and frontend_calls:
+            for method, path in frontend_calls:
+                if method == "UNKNOWN":
+                    all_paths = {p for s in backend_paths_by_method.values() for p in s}
+                    if path in all_paths:
+                        continue
+                    sug = get_close_matches(path, list(all_paths), n=3, cutoff=0.6)
+                    misses.append(f"CONTRACT MISS: {method} {path}   suggestions: {sug or '(none)'}")
+                    continue
+
+                cand_paths = backend_paths_by_method.get(method, set())
+                if path in cand_paths:
+                    continue
+
+                methods_serving_this_path = sorted([
+                    meth for meth, paths in backend_paths_by_method.items() if path in paths
+                ])
+                if methods_serving_this_path:
+                    misses.append(
+                        f"CONTRACT MISS: METHOD {method} {path}   "
+                        f"backend serves this path with: {methods_serving_this_path}. "
+                        f"suggestions: {methods_serving_this_path}"
+                    )
+                    continue
+
+                all_paths = {p for s in backend_paths_by_method.values() for p in s}
+                sug = get_close_matches(path, list(all_paths), n=3, cutoff=0.6)
+                misses.append(f"CONTRACT MISS: {method} {path}   suggestions: {sug or '(none)'}")
+
+        return ("failed", misses) if misses else ("passed", [])

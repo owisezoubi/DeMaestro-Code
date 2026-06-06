@@ -4,3 +4,49 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }
+
+@layer components {
+  /* ===== Semantic surfaces (use these for ALL neutral colors) ===== */
+
+  .surface-page {
+    @apply bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+  }
+  .surface-elevated {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-900 dark:text-slate-100;
+  }
+  .surface-panel {
+    @apply bg-white text-slate-900 border border-slate-200
+           dark:bg-slate-900 dark:text-slate-100 dark:border-slate-800;
+  }
+  .surface-muted {
+    @apply bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300;
+  }
+
+  .text-default { @apply text-slate-900 dark:text-slate-100; }
+  .text-muted   { @apply text-slate-600 dark:text-slate-400; }
+  .text-subtle  { @apply text-slate-500 dark:text-slate-400; }
+
+  .border-default { @apply border-slate-200 dark:border-slate-700; }
+  .border-muted   { @apply border-slate-100 dark:border-slate-800; }
+
+  .divider { @apply border-t border-slate-200 dark:border-slate-700; }
+
+  /* Input fields — always readable in both modes */
+  .surface-input {
+    @apply bg-white text-slate-900 border border-slate-300 placeholder-slate-400
+           dark:bg-slate-800 dark:text-slate-100 dark:border-slate-600 dark:placeholder-slate-500;
+  }
+  /* Navigation / sidebar backgrounds */
+  .surface-nav {
+    @apply bg-slate-50 text-slate-900 border-r border-slate-200
+           dark:bg-slate-900 dark:text-slate-100 dark:border-slate-700;
+  }
+
+  /* Status surfaces (semantic — keep their meaning regardless of theme) */
+  .surface-success { @apply bg-emerald-50 text-emerald-900 border border-emerald-200
+                            dark:bg-emerald-950 dark:text-emerald-100 dark:border-emerald-900; }
+  .surface-warning { @apply bg-amber-50 text-amber-900 border border-amber-200
+                            dark:bg-amber-950 dark:text-amber-100 dark:border-amber-900; }
+  .surface-danger  { @apply bg-red-50 text-red-900 border border-red-200
+                            dark:bg-red-950 dark:text-red-100 dark:border-red-900; }
+}

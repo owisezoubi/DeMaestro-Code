@@ -76,3 +76,4 @@ class ProjectMeta(BaseModel):
     generated_count: int = 0
     total_files: int = 0
     current_stage: str = "architect"
+    last_failed_checks: list[str] = []

@@ -34,17 +34,38 @@ class ArchitectAgent:
 
         response = client.messages.create(
             model=self.model,
-            max_tokens=4000,
-            messages=[
-                {
-                    "role": "user",
-                    "content": self._build_architect_prompt(context),
-                }
-            ],
+            max_tokens=16000,
+            messages=[{"role": "user", "content": self._build_architect_prompt(context)}],
         )
-
         plan_text = response.content[0].text
-        plan = self._parse_generation_plan(plan_text)
+
+        try:
+            plan = self._parse_generation_plan(plan_text)
+        except (json.JSONDecodeError, ValueError) as exc:
+            # Most likely truncation. Retry once with stronger instruction.
+            self.log.warning(
+                "architect.parse_failed_retrying",
+                error=str(exc),
+                tail=plan_text[-300:],
+                length=len(plan_text),
+            )
+            retry_prompt = (
+                self._build_architect_prompt(context)
+                + "\n\nYour previous attempt was TRUNCATED — the JSON ended mid-string "
+                  "and could not be parsed. Output the COMPLETE valid JSON plan in full. "
+                  "Do not abbreviate, do not use markdown code fences. Output must start "
+                  "with `{` and end with `}` and be parseable by json.loads. If the plan "
+                  "is large, reduce the number of files to the minimum needed but keep "
+                  "the JSON syntactically complete."
+            )
+            retry = client.messages.create(
+                model=self.model,
+                max_tokens=16000,
+                messages=[{"role": "user", "content": retry_prompt}],
+            )
+            plan_text = retry.content[0].text
+            plan = self._parse_generation_plan(plan_text)
+            self.log.info("architect.retry_succeeded", length=len(plan_text))
 
         self.log.info("architect.done", num_files=len(plan.files), stack=plan.technology_stack)
         return plan
@@ -102,11 +123,13 @@ DEMO / SEED DATA — REQUIRED, the app must never open empty:
   try/except that prints any exception (no silent failures).
 
 DEPLOYMENT-READY CONFIG (keep config env-driven; do NOT add deploy files):
-- Backend: read DATABASE_URL, CORS_ORIGINS (comma-separated), and the port from the
-  environment — bind host 0.0.0.0, port int(os.getenv("PORT", "8000")). Never
-  hardcode localhost in backend code.
-- Frontend: the API base URL must come from import.meta.env.VITE_API_BASE_URL
-  (default "http://localhost:8000"); never hardcode a backend URL in components.
+- Backend: read DATABASE_URL, CORS_ORIGINS (comma-separated), and the port
+  from the environment — bind host 0.0.0.0, port int(os.getenv("PORT",
+  os.getenv("BACKEND_PORT", "8100"))). The default port is 8100 (not 8000)
+  because DeMaestro itself runs on 8000. Never hardcode localhost in backend code.
+- Frontend: VITE_API_BASE_URL defaults to "http://localhost:8100", VITE_PORT
+  defaults to 5273. The API base URL must come from import.meta.env.VITE_API_BASE_URL;
+  never hardcode a backend URL in components.
 - Keep psycopg2-binary available so production can switch to managed Postgres just by
   setting DATABASE_URL. Do NOT create vercel.json, render.yaml, or Procfile.
 
@@ -172,12 +195,57 @@ Output a JSON GenerationPlan with:
   admin@example.com/admin1234.
 - API CONTRACT: every fetch in the frontend MUST hit a path that exists in the
   backend — verify your plan covers both ends of each call.
+- AUTH CONTRACT: when planning auth routes, decide UP FRONT whether the login
+  endpoint uses OAuth2PasswordRequestForm (form-encoded username/password) or
+  a JSON Pydantic LoginRequest schema (`email` + `password`). Whichever you
+  choose, generate BOTH the backend route AND the frontend login call to match.
+  Mention the choice explicitly in the plan notes so the generator sees the
+  decision while writing both files.
+- COLOR DISCIPLINE: tell the generator (via plan.notes) to use the semantic
+  surface classes for ALL neutral surfaces and only primary-* for accents. The
+  available semantic classes are: surface-page, surface-elevated, surface-panel,
+  surface-muted, surface-input (for form fields), surface-nav (for sidebars/nav),
+  surface-success, surface-warning, surface-danger, text-default, text-muted,
+  text-subtle, border-default, divider. No hand-rolled bg-slate-X + text-slate-Y
+  combos — those break dark mode. Every dark-background element MUST pair with a
+  light foreground (dark:bg-slate-900 → dark:text-slate-100).
+- ROUTE STATUS CODES: when planning DELETE / soft-delete / "remove" endpoints,
+  decide if they should return 200 with a confirmation body OR 204 with no body.
+  Specify this choice in plan.notes so the generator writes the route +
+  schema + frontend handler consistently. Default to 200 unless the user
+  explicitly wants empty responses — 200 is more forgiving.
+- AUTHENTICATED API CLIENT: the frontend MUST have one centralized axios client
+  at `frontend/src/lib/api.js` that injects the Bearer token from localStorage.
+  Every page/component that calls /api/ imports it. Bare fetch() to /api/
+  endpoints is forbidden because it bypasses authentication. Specify in
+  plan.notes that the generator must use this client uniformly across all
+  generated files.
 - DB: database.py MUST `load_dotenv()`, default DATABASE_URL to
   sqlite:///./app.db, pass connect_args={{"check_same_thread": False}} for
   sqlite, use SYNC SQLAlchemy and portable column types.
 - IMPORTS: every @/components/ X import must point to a file in your plan OR
   one of the 12 core shadcn components. Bare npm imports must be in
   extra_frontend_dependencies.
+- DARK MODE IS MANDATORY: every generated app must support a working light/dark
+  theme toggle. Your `files` list must include:
+    * frontend/src/context/ThemeContext.jsx — provides theme state ("light" or
+      "dark"), persists to localStorage, applies/removes the `dark` class on
+      <html> via useEffect. Exposes useTheme() hook.
+    * frontend/src/components/ThemeToggle.jsx — a small button with sun/moon
+      icons from lucide-react that flips the theme.
+  And the existing main.jsx wraps the app in <ThemeProvider>, and at least one
+  header/navbar renders <ThemeToggle />. tailwind.config.js already has
+  darkMode: 'class' (scaffolding).
+- COLOR USAGE IS RESTRICTED: every page and component MUST use `primary-*`
+  Tailwind classes for buttons, links, icon accents, header backgrounds, and
+  any other accent colors. NEVER hardcode `bg-blue-*`, `bg-red-*`, `bg-green-*`,
+  `text-blue-*` etc. — those break the palette swap. Use `slate` only for
+  neutrals (borders, body text, muted backgrounds). For accents always use
+  primary-*. (If a status pill genuinely needs semantic color like green for
+  success or red for error, those are allowed but should be rare.)
+- THEME CONTEXT INTEGRITY: when planning ThemeContext / ThemeProvider, specify
+  in plan.notes that the useEffect MUST toggle `document.documentElement`'s
+  `dark` class — without that, the entire dark-mode investment is dead code.
 
 ## Files you must NOT include in your plan
 

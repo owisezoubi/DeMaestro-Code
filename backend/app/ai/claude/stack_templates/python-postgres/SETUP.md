@@ -1,5 +1,9 @@
 # Running {{app_name}} locally
 
+> The app runs on port **8100** (backend) and **5273** (frontend) by default,
+> chosen so it doesn't conflict with DeMaestro (8000 / 5173). Override via
+> `BACKEND_PORT` / `VITE_PORT` in `.env` if you need different ports.
+
 ## Option 1 — One-command setup (recommended)
 
 **Mac/Linux:**
@@ -14,7 +18,7 @@ setup.bat
 start.bat
 ```
 
-Then open http://localhost:5173 in your browser.
+Then open http://localhost:5273 in your browser.
 
 ## Option 2 — Docker (no Python or Node needed locally)
 
@@ -22,7 +26,7 @@ Then open http://localhost:5173 in your browser.
 docker compose up --build
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5273.
 
 ## Option 3 — Manual setup (if you prefer)
 
@@ -34,7 +38,7 @@ python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp ../.env.example ../.env         # then edit ../.env
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8100
 ```
 
 ### Frontend

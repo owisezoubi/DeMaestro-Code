@@ -23,9 +23,9 @@ services:
       DATABASE_URL: postgresql://postgres:password@db:5432/{{app_slug}}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-in-production}
       ENVIRONMENT: ${ENVIRONMENT:-development}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5273}
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_PORT:-8100}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -37,9 +37,9 @@ services:
   frontend:
     build: ./frontend
     environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8100}
     ports:
-      - "${VITE_PORT:-5173}:5173"
+      - "${VITE_PORT:-5273}:5173"
     depends_on:
       - backend
     volumes:

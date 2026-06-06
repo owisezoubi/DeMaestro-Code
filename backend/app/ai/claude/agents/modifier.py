@@ -96,6 +96,28 @@ Output ONLY valid JSON in this exact shape (no markdown, no commentary):
             raw = response.content[0].text.strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw.strip())
+
+            if getattr(response, "stop_reason", None) == "max_tokens":
+                self.log.warning(
+                    "modify.truncated_retrying",
+                    tail=raw[-200:],
+                    length=len(raw),
+                )
+                retry_prompt = prompt + (
+                    "\n\nYour previous attempt was TRUNCATED at the token limit. "
+                    "Output the COMPLETE valid JSON with all opened braces closed. "
+                    "Do not abbreviate, do not use markdown fences. Output must start "
+                    "with `{` and end with `}` and be parseable by json.loads."
+                )
+                retry = client.messages.create(
+                    model=self.model,
+                    max_tokens=16000,
+                    messages=[{"role": "user", "content": retry_prompt}],
+                )
+                raw = retry.content[0].text.strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw.strip())
+
             parsed = json.loads(raw)
             modified = parsed.get("modified_files", {}) or {}
             self.log.info(

@@ -219,8 +219,12 @@ function FailedCard({ projectId, qc }) {
   })
 
   const title = isGenFailure ? 'Code generation failed' : 'Something went wrong'
+  const partialCount = project?.generated_count || 0
+  const totalCount = project?.total_files || 0
   const description = isGenFailure
-    ? "The previous attempt didn't finish. Your approved requirements and blueprint are saved — Retry will pick up from code generation."
+    ? (partialCount > 0
+        ? `${partialCount}${totalCount ? ' of ' + totalCount : ''} files were already generated and saved. Retry will continue from where it left off — no work will be re-done.`
+        : "Your approved requirements and blueprint are saved. Retry will start code generation.")
     : "We couldn't analyze your requirements. Retry will run the analysis again."
   const buttonText = isGenFailure ? 'Retry code generation' : 'Retry analysis'
 
@@ -233,6 +237,18 @@ function FailedCard({ projectId, qc }) {
       <p className="text-sm text-slate-500 dark:text-slate-400 mb-4 max-w-md">
         {description}
       </p>
+      {project?.last_failed_checks?.length > 0 && (
+        <div className="mb-4 text-sm">
+          <p className="font-semibold text-slate-800 dark:text-slate-100">
+            Failed checks:
+          </p>
+          <ul className="list-disc list-inside text-slate-600 dark:text-slate-400">
+            {project.last_failed_checks.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {errorMessage && (
         <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-md mb-4 max-w-md text-left font-mono break-words">
           <span className="font-semibold not-italic">Previous error:</span><br/>

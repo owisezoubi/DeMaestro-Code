@@ -31,6 +31,12 @@ class BlueprintResponse(BaseModel):
     api_routes: list[APIRoute]
     frontend_pages: list[FrontendPage]
     technology_stack_notes: str
+    # One of: "auth_gate" | "public_home" | "public_landing_with_login".
+    # "auth_gate"  — every meaningful page requires login (Planty, dashboards).
+    # "public_home" — no accounts or fully public content (galleries, catalogs).
+    # "public_landing_with_login" — public landing + optional user accounts.
+    # Defaults to "auth_gate" for backward compat with old blueprints.
+    landing_strategy: str = "auth_gate"
 
 
 class BlueprintAgent(GeminiAgent):

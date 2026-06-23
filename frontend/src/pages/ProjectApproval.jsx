@@ -1,12 +1,10 @@
 import { useState, useEffect } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Markdown from 'react-markdown'
 import { toast } from 'sonner'
-import { ArrowLeft, CheckCircle2, Database, Layout, Loader2, Pencil, Plus, Users } from 'lucide-react'
+import { CheckCircle2, Database, Layout, Loader2, Pencil, Plus, Users } from 'lucide-react'
 
-import Logo from '../components/Logo'
-import ThemeToggle from '../components/ThemeToggle'
 import EditRequirementsModal from '../components/EditRequirementsModal'
 import { approveProject } from '../api/approval'
 import { getClarificationHistory } from '../api/structure'
@@ -61,18 +59,7 @@ export default function ProjectApproval() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
-      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
-          <Logo />
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            <Link to={`/projects/${projectId}`} className="btn-secondary text-sm">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back
-            </Link>
-          </div>
-        </div>
-      </header>
+
 
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-4">
         {/* Title + approval banner */}

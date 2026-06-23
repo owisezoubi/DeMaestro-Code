@@ -9,15 +9,34 @@ Best-effort packaging: if tests fail after all debug cycles, the pipeline
 still packages the ZIP and sets status to ready_with_warnings so the user
 can inspect and fix the code themselves.
 """
+import ast
+import dataclasses
 import json
+import os
 import re as _re
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
 import structlog
 
 from app.ai.claude.agents.architect import ArchitectAgent
-from app.config import settings
-from app.ai.claude.agents.debugger import DebuggerAgent, _is_infrastructure_error
+from app.config import settings, get_agent_model
+from app.pipeline.checklist import coerce_checklist
+from app.pipeline.checklist_runner import run_checklist, check_import_resolution
+from app.ai.claude.agents.debugger import (
+    DebuggerAgent,
+    _is_infrastructure_error,
+    _fix_upload_static_mount,
+    _detect_duplicate_top_level_decls,
+    _auto_stub_missing_contract_endpoints,
+)
 from app.ai.claude.agents.deployer import DeployerAgent
-from app.ai.claude.agents.generator import GeneratorAgent
+from app.ai.claude.agents.generator import (
+    GeneratorAgent,
+    _check_contract_coverage,
+    _route_file_for_endpoint,
+)
 from app.ai.claude.agents.tester import TesterAgent
 from app.ai.claude.agents.verifier import VerifierAgent
 from app.ai.gemini.agents.blueprint import BlueprintResponse
@@ -25,10 +44,357 @@ from app.models.generation_plan import GenerationPlan
 from app.models.project import ProjectStatus
 from app.services import firestore_service
 from app.services import template_service
+from app.services import vercel_deployer
 
 log = structlog.get_logger("GenerationOrchestrator")
 
 _MAX_TEST_CYCLES = 10
+
+# ── Cancellation registry ────────────────────────────────────────────────────
+
+_CANCELLATION_FLAGS: dict[str, bool] = {}
+_ACTIVE_PROJECTS: dict[str, bool] = {}
+
+
+def request_cancellation(project_id: str) -> None:
+    _CANCELLATION_FLAGS[project_id] = True
+    log.info("pipeline.cancellation_requested", project_id=project_id)
+
+
+def is_cancelled(project_id: str) -> bool:
+    return _CANCELLATION_FLAGS.get(project_id, False)
+
+
+def clear_cancellation(project_id: str) -> None:
+    _CANCELLATION_FLAGS.pop(project_id, None)
+
+
+def is_active(project_id: str) -> bool:
+    return _ACTIVE_PROJECTS.get(project_id, False)
+
+
+def _mark_active(project_id: str) -> None:
+    _ACTIVE_PROJECTS[project_id] = True
+
+
+def _mark_inactive(project_id: str) -> None:
+    _ACTIVE_PROJECTS.pop(project_id, None)
+
+# ── Snapshot / replay system ─────────────────────────────────────────────────
+
+SNAPSHOT_ROOT = Path.home() / ".demaestro" / "snapshots"
+
+# Set DEMAESTRO_LLM_DEBUG=false to run only algorithmic debug fixes (no Claude
+# calls) during test/debug cycles.  Useful for iterating on deterministic helpers
+# without spending API tokens.
+USE_LLM_DEBUG = os.environ.get("DEMAESTRO_LLM_DEBUG", "true").lower() == "true"
+
+
+def _save_snapshot(
+    project_id: str,
+    files: dict,
+    blueprint: dict,
+    stage: str,
+    plan_dict: dict | None = None,
+    checklist: list | None = None,
+    checklist_results: list | None = None,
+) -> Path:
+    """Save the current file tree + metadata to ~/.demaestro/snapshots/.
+
+    stage: 'post_generate' | 'post_cycle_N' | 'final'
+    Returns the snapshot directory path.
+    Never raises — errors are logged and swallowed so the pipeline is not
+    interrupted.
+    """
+    try:
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        slug = (blueprint.get("app_name") or project_id).lower()
+        slug = _re.sub(r"[^a-z0-9]+", "-", slug).strip("-") or "project"
+        dir_name = f"{slug}__{project_id[:8]}__{ts}__{stage}"
+        target = SNAPSHOT_ROOT / dir_name
+        target.mkdir(parents=True, exist_ok=True)
+
+        for path, content in files.items():
+            file_target = target / path
+            file_target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                file_target.write_text(content, encoding="utf-8")
+            except (UnicodeEncodeError, TypeError):
+                file_target.write_bytes(content.encode("utf-8", errors="replace"))
+
+        (target / "_blueprint.json").write_text(
+            json.dumps(blueprint, indent=2), encoding="utf-8"
+        )
+        manifest: dict = {
+            "project_id": project_id,
+            "stage": stage,
+            "saved_at": ts,
+            "num_files": len(files),
+        }
+        if plan_dict:
+            manifest["plan"] = plan_dict
+        (target / "_manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        if checklist:
+            (target / "checklist.json").write_text(
+                json.dumps(checklist, indent=2, ensure_ascii=True), encoding="utf-8"
+            )
+        log.info("snapshot.saved", path=str(target), stage=stage, num_files=len(files))
+        return target
+    except Exception as exc:
+        log.warning("snapshot.save_failed", stage=stage, project_id=project_id, error=str(exc))
+        return SNAPSHOT_ROOT  # fallback — caller ignores return value in most cases
+
+
+def _diff_imports(before: str, after: str) -> dict:
+    """Return {added, removed} sets of import lines between two file versions."""
+    _imp_re = _re.compile(
+        r"^(?:from\s+\S+\s+import\s+[^\n]+|import\s+[^\n]+)$",
+        _re.MULTILINE,
+    )
+    before_set = set(_imp_re.findall(before or ""))
+    after_set  = set(_imp_re.findall(after or ""))
+    return {
+        "added":   sorted(after_set - before_set),
+        "removed": sorted(before_set - after_set),
+    }
+
+
+_BUILTIN_NAMES = {
+    "int", "str", "float", "bool", "list", "dict", "set", "tuple",
+    "bytes", "None", "True", "False", "object", "type", "Any",
+    "Optional", "Union", "Callable", "Iterable", "Mapping",
+}
+
+
+def _collect_imports(tree) -> set:
+    names: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                names.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
+def _collect_annotation_names(tree) -> set:
+    names: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and node.annotation:
+            for sub in ast.walk(node.annotation):
+                if isinstance(sub, ast.Name):
+                    names.add(sub.id)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in node.args.args + node.args.kwonlyargs:
+                if arg.annotation:
+                    for sub in ast.walk(arg.annotation):
+                        if isinstance(sub, ast.Name):
+                            names.add(sub.id)
+    return names
+
+
+def _post_fix_validate(
+    files: dict,
+    modified_paths: list,
+    pre_debug_snapshot: dict,
+) -> None:
+    """Cheap static pass over debugger-modified Python files.
+
+    Catches two classes of bug immediately:
+      - SyntaxError: rolls back to pre-debug content so the next cycle
+        starts from a known-parseable file.
+      - Annotation names not covered by any import: logs a warning so
+        the "used but not imported" bug is visible in the same cycle.
+    """
+    for path in modified_paths:
+        if not path.endswith(".py"):
+            continue
+        content = files.get(path, "")
+        if not content:
+            continue
+        try:
+            tree = ast.parse(content)
+        except SyntaxError as exc:
+            log.error("debug.post_fix.syntax_error", path=path, error=str(exc))
+            if path in pre_debug_snapshot:
+                files[path] = pre_debug_snapshot[path]
+            continue
+
+        imports = _collect_imports(tree)
+        annotations = _collect_annotation_names(tree)
+        missing = annotations - imports - _BUILTIN_NAMES
+        if missing:
+            log.warning(
+                "debug.post_fix.unresolved_names",
+                path=path,
+                missing=sorted(missing),
+            )
+
+
+# Check names that block ZIP.  typecheck remains advisory.
+# contract is REAL only for critical misses; the tester returns "advisory_failed"
+# for minor endpoint gaps — that value is excluded here.
+# smoke and reachability: now REAL (not advisory) — login failures block ZIP.
+# fe_be_contract: REAL when DEMAESTRO_FE_BE_CONTRACT_STRICT=true (default).
+_REAL_CHECK_NAMES: frozenset = frozenset({
+    "install", "lint", "boot", "frontend_build", "contract", "route_ordering",
+    "route_link_consistency", "navbar_renders_links",
+    "smoke",           # strict auth check (register→login→/me must all pass)
+    "reachability",    # endpoint existence probe (404/405/5xx = FAIL)
+    "fe_be_contract",  # offline frontend↔backend body-shape match
+    "verify",          # blueprint↔generated-code route existence check
+})
+
+
+def _apply_strict_gate(
+    test_results: dict,
+    generated_files: dict,
+    blueprint_dict: dict,
+    plan_dict: dict,
+    uid: str,
+    project_id: str,
+) -> set:
+    """Centralised pre-deploy gate shared by run_full_pipeline and run_test_debug_only.
+
+    Checks passed_checks for any REAL failure.  When failures are found, updates
+    Firestore to tests_failed_recoverable and saves a snapshot.
+
+    Returns the set of failing check names (empty = clear to proceed, non-empty =
+    gate fired — caller must abort / return without deploying).
+    """
+    final_checks = (test_results or {}).get("passed_checks", {}) or {}
+    gate_failures = {
+        c for c, s in final_checks.items()
+        if s == "failed" and c in _REAL_CHECK_NAMES
+    }
+    if not gate_failures:
+        return set()
+
+    gate_msg = (
+        f"Tests did not pass: {', '.join(sorted(gate_failures))}. "
+        "Generated files are preserved — use 'Re-run Tests' to retry."
+    )
+    log.error(
+        "pipeline.strict_failure",
+        project_id=project_id,
+        real_failures=sorted(gate_failures),
+        reason="real_failures_present_before_deploy",
+    )
+    firestore_service.update_project(uid, project_id, {
+        "status": ProjectStatus.tests_failed_recoverable,
+        "current_stage": "testing",
+        "last_error": gate_msg,
+        "last_failed_checks": sorted(gate_failures),
+        "real_failures": sorted(gate_failures),
+        "test_error_log": (
+            "\n".join(test_results.get("errors", []) or [])
+        )[:5000],
+    })
+    try:
+        _save_snapshot(project_id, generated_files, blueprint_dict, "final", plan_dict)
+    except Exception:
+        pass
+    return gate_failures
+
+
+def _blueprint_auth_enabled(blueprint_dict: dict, sr=None) -> bool:
+    """Return True when auth is enabled (the default), False when explicitly disabled."""
+    # Check blueprint.frontend.auth.enabled first (set by _enforce_auth_policy).
+    fe_auth = (
+        blueprint_dict.get("frontend", {}).get("auth", {})
+        if isinstance(blueprint_dict.get("frontend"), dict)
+        else {}
+    )
+    if isinstance(fe_auth, dict) and "enabled" in fe_auth:
+        return bool(fe_auth["enabled"])
+    # Fall back to sr.auth_required: False = disabled, True/None = enabled.
+    if sr is not None and getattr(sr, "auth_required", None) is False:
+        return False
+    return True
+
+
+def _build_pages_md(blueprint: BlueprintResponse, app_name: str, auth_enabled: bool = True) -> str:
+    """Build a human-readable PAGES.md summarising all routes and API endpoints."""
+    lines = [
+        f"# {app_name} — Pages",
+        "",
+        "Quick reference for what's in this app without running it.",
+        "",
+    ]
+
+    pages = blueprint.frontend_pages
+    if pages:
+        lines += [
+            "## Routes",
+            "",
+            "| Path | Page | Description |",
+            "|------|------|-------------|",
+        ]
+        for p in pages:
+            desc = getattr(p, "purpose", "") or ""
+            lines.append(f"| `{p.route}` | {p.name} | {desc} |")
+        lines.append("")
+
+    routes = blueprint.api_routes
+    if routes:
+        lines += [
+            "## API endpoints",
+            "",
+            "| Method | Path | Description |",
+            "|--------|------|-------------|",
+        ]
+        for r in routes:
+            lines.append(f"| {r.method} | `{r.path}` | {r.description} |")
+        lines.append("")
+
+    if auth_enabled:
+        lines += [
+            "## Demo credentials",
+            "",
+            "After running `start.sh`, the seed inserts:",
+            "- `demo@example.com` / `demo1234` (regular user)",
+            "- `admin@example.com` / `admin1234` (admin)",
+            "",
+        ]
+    else:
+        lines += [
+            "## Access",
+            "",
+            "This app is fully public — no sign-in needed.",
+            "",
+        ]
+
+    lines += [
+        "## Running locally",
+        "",
+        "```bash",
+        "bash start.sh",
+        "```",
+        "Open http://localhost:5273 in your browser.",
+        "",
+    ]
+    return "\n".join(lines)
+
+# Auth scaffold files — loaded from the stack template directory and injected
+# verbatim into every project.  The LLM must never generate or overwrite these.
+_AUTH_SCAFFOLD_FILES = frozenset({
+    "backend/app/auth.py",
+    "backend/app/main.py",               # pre-seeded with CORS + health + auth router
+    "backend/app/routes/auth_routes.py",
+    "frontend/src/lib/auth.js",
+    "frontend/src/contexts/AuthContext.jsx",
+})
+
+# Variant template files that are loaded from the scaffold directory but must
+# never appear verbatim in the generated output — they're renamed or discarded.
+_NO_AUTH_VARIANT_FILES = frozenset({
+    "backend/app/main_no_auth.py",
+    "frontend/src/App_no_auth.jsx",
+    "frontend/src/lib/routes_no_auth.js",
+})
 
 _TAILWIND_PALETTES: dict[str, dict[str, str]] = {
     "blue":    {"50":"#EFF6FF","100":"#DBEAFE","200":"#BFDBFE","300":"#93C5FD",
@@ -69,9 +435,10 @@ _VIBE_KEYWORDS: dict[str, list[str]] = {
 }
 
 
-def _detect_design_brief(sr) -> dict:
-    """Scan the structured requirements for visual styling cues. Returns a dict
-    like {'primary_color': 'blue', 'vibe': 'minimalist', 'cues': [...]}."""
+def _detect_design_brief(sr) -> dict | None:
+    """Scan requirements for explicit color words. Returns a dict only when the
+    user actually asked for a specific color ('orange and white', 'blue theme',
+    'make it green'). Returns None so the safe neutral default ships unchanged."""
     haystack_parts: list[str] = []
     haystack_parts.append(sr.summary or "")
     for r in sr.user_requirements:
@@ -81,9 +448,6 @@ def _detect_design_brief(sr) -> dict:
 
     chosen_color: str | None = None
     for color in _TAILWIND_PALETTES.keys():
-        # Any standalone mention of the color word that is reasonably close to
-        # a style cue ("color", "theme", "palette", "tones", "style", "look",
-        # "scheme", "shade") — or just a strong standalone mention.
         patterns = [
             rf"\b{color}\b\s+(?:and|with)\s+(?:white|black|gray|slate|cream|beige)",
             rf"(?:white|black|gray|slate|cream|beige)\s+(?:and|with)\s+\b{color}\b",
@@ -100,6 +464,10 @@ def _detect_design_brief(sr) -> dict:
         if chosen_color:
             break
 
+    # Return None when no explicit color is mentioned — let the neutral default ship as-is.
+    if not chosen_color:
+        return None
+
     chosen_vibe: str | None = None
     for vibe, keys in _VIBE_KEYWORDS.items():
         for k in keys:
@@ -114,6 +482,13 @@ def _detect_design_brief(sr) -> dict:
         "vibe": chosen_vibe,
         "cues": [c for c in [chosen_color, chosen_vibe] if c],
     }
+
+
+def _hex_to_rgb_space(hex_color: str) -> str:
+    """Convert '#EA580C' → '234 88 12' for CSS custom property values."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"{r} {g} {b}"
 
 
 _BAD_COLOR_PATTERNS = [
@@ -179,31 +554,46 @@ def _scan_color_violations(generated_files: dict) -> list:
     return violations
 
 
-def _apply_design_brief_to_scaffolding(generated_files: dict, brief: dict) -> None:
-    """Mutate the seeded tailwind.config.js so the primary palette matches the
-    user-requested color. No-op when no color was detected."""
+def _apply_design_brief_to_scaffolding(generated_files: dict, brief: dict | None) -> None:
+    """Override --accent in index.css to match the user-requested color.
+    No-op when brief is None. Never touches dark-mode config."""
+    if brief is None:
+        return
     color = brief.get("primary_color")
     if not color or color not in _TAILWIND_PALETTES:
         return
-    path = "frontend/tailwind.config.js"
-    config = generated_files.get(path)
-    if not config:
-        return
     palette = _TAILWIND_PALETTES[color]
-    new_block = "primary: {\n"
-    for k, v in palette.items():
-        new_block += f'          {k}: "{v}",\n'
-    new_block += "        },"
-    new_config, count = _re.subn(
-        r"primary:\s*\{[^{}]*\},",
-        new_block,
-        config,
+    accent_hex = palette.get("600") or palette.get("500") or "#2563EB"
+    accent_rgb = _hex_to_rgb_space(accent_hex)
+    css_path = "frontend/src/index.css"
+    css = generated_files.get(css_path)
+    if not css or "--accent:" not in css:
+        return
+    new_css = _re.sub(
+        r"(--accent:\s*)[\d ]+;",
+        rf"\g<1>{accent_rgb};",
+        css,
         count=1,
-        flags=_re.DOTALL,
     )
-    if count > 0:
-        generated_files[path] = new_config
-        log.info("pipeline.design_brief_applied", color=color)
+    if new_css != css:
+        generated_files[css_path] = new_css
+        log.info("pipeline.design_brief_applied", color=color, accent_rgb=accent_rgb)
+
+
+def _item_to_dict(item) -> dict:
+    """Convert a checklist dataclass instance to a plain dict."""
+    try:
+        return dataclasses.asdict(item)
+    except Exception:
+        return {}
+
+
+def _checklist_results_to_payload(results: list) -> list:
+    """Convert a list of CheckResult objects to serialisable dicts."""
+    return [
+        {"item_id": r.item_id, "status": r.status, "reason": r.reason or ""}
+        for r in results
+    ]
 
 
 class GenerationOrchestrator:
@@ -215,6 +605,134 @@ class GenerationOrchestrator:
         self.verifier = VerifierAgent()
         self.deployer = DeployerAgent()
 
+    # ── Post-deploy fix loop ──────────────────────────────────────────────────
+
+    _MAX_POST_DEPLOY_FIXES = 2
+
+    def _post_deploy_fix_loop(
+        self,
+        project_id: str,
+        uid: str,
+        deployment_result: dict,
+        generated_files: dict,
+        contract_paths: list[dict] | None = None,
+    ) -> None:
+        """After initial Vercel deploy, smoke-test the live URL.
+        If 500s appear, call the agentic debugger, apply patches,
+        and redeploy. Up to _MAX_POST_DEPLOY_FIXES cycles.
+        Writes deployment_status / deployment_health back to Firestore.
+        """
+        url = deployment_result["url"]
+        deployment_id = deployment_result["deployment_id"]
+        project_name = deployment_result["project_name"]
+
+        for attempt in range(1, self._MAX_POST_DEPLOY_FIXES + 1):
+            import time as _time
+            _time.sleep(5)  # let the function warm up
+
+            smoke = vercel_deployer.post_deploy_smoke(url, contract_paths=contract_paths)
+            if smoke["healthy"]:
+                log.info(
+                    "post_deploy.healthy",
+                    project_id=project_id, url=url, attempt=attempt,
+                )
+                firestore_service.update_project(uid, project_id, {
+                    "deployment_status": "ready",
+                    "deployment_url": url,
+                    "deployment_health": "ok",
+                })
+                return
+
+            # Fetch runtime logs for additional context.
+            runtime_logs = vercel_deployer.fetch_vercel_runtime_logs(
+                os.environ.get("DEMAESTRO_VERCEL_TOKEN", ""),
+                deployment_id,
+            )
+            log.warning(
+                "post_deploy.unhealthy",
+                project_id=project_id, attempt=attempt,
+                endpoint_errors=smoke["endpoint_errors"][:5],
+                runtime_log_count=len(runtime_logs),
+            )
+
+            # Build synthetic test_results so the agentic debugger understands the context.
+            synthetic_errors = [
+                f"POST-DEPLOY {e['method']} {e['path']} -> "
+                f"{e['status']}: {e['body_preview'][:200]}"
+                for e in smoke["endpoint_errors"]
+            ]
+            synthetic_results = {
+                "errors": synthetic_errors,
+                "logs": {
+                    "post_deploy_smoke": "\n".join(synthetic_errors),
+                    "vercel_runtime": "\n".join(
+                        f"[{l['type']}] {l['text']}" for l in runtime_logs
+                    ),
+                },
+                "passed_checks": {},
+            }
+
+            patches = self.debugger._agentic_holistic_fix(
+                synthetic_results, generated_files, max_attempts=1,
+            )
+            if not patches:
+                log.error(
+                    "post_deploy.agentic_no_patches",
+                    project_id=project_id, attempt=attempt,
+                )
+                firestore_service.update_project(uid, project_id, {
+                    "deployment_status": "ready_with_errors",
+                    "deployment_url": url,
+                    "deployment_health": "errors",
+                    "deployment_error": (
+                        "Live app has runtime errors that agentic "
+                        "fallback could not resolve. See Vercel logs."
+                    ),
+                })
+                return
+
+            generated_files.update(patches)
+            firestore_service.update_project(uid, project_id, {
+                "generated_files": generated_files,
+                "deployment_status": "redeploying",
+            })
+            log.info(
+                "post_deploy.patches_applied",
+                project_id=project_id, attempt=attempt,
+                files=list(patches.keys()),
+            )
+
+            try:
+                deployment_result = vercel_deployer.deploy(
+                    project_name=project_name,
+                    files=generated_files,
+                    wait_for_ready=True,
+                )
+                url = deployment_result["url"]
+                deployment_id = deployment_result["deployment_id"]
+                firestore_service.update_project(uid, project_id, {
+                    "deployment_url": url,
+                })
+            except vercel_deployer.VercelDeployError as e:
+                log.error("post_deploy.redeploy_failed", project_id=project_id, error=str(e))
+                firestore_service.update_project(uid, project_id, {
+                    "deployment_status": "failed",
+                    "deployment_error": f"redeploy failed: {e}",
+                })
+                return
+
+        log.warning("post_deploy.max_attempts_exhausted", project_id=project_id, url=url)
+        firestore_service.update_project(uid, project_id, {
+            "deployment_status": "ready_with_errors",
+            "deployment_url": url,
+            "deployment_health": "errors",
+            "deployment_error": (
+                f"Live app still failing after "
+                f"{self._MAX_POST_DEPLOY_FIXES} post-deploy fix attempts. "
+                "Manual debugging required."
+            ),
+        })
+
     # ── W5-P1 simple entry point (kept for backward-compat) ──────────────────
 
     def run_generation(self, uid: str, project_id: str) -> dict:
@@ -223,6 +741,15 @@ class GenerationOrchestrator:
         Returns: { status, generated_files, plan, errors }
         """
         log.info("generation.start", project_id=project_id)
+        log.info(
+            "pipeline.models",
+            project_id=project_id,
+            architect=get_agent_model("architect"),
+            generator=get_agent_model("generator"),
+            debugger=get_agent_model("debugger"),
+            verifier=get_agent_model("verifier"),
+            modifier=get_agent_model("modifier"),
+        )
 
         try:
             project = firestore_service.get_project(uid, project_id)
@@ -251,8 +778,9 @@ class GenerationOrchestrator:
             if resuming:
                 plan = GenerationPlan(**existing_plan)
                 generated_files: dict[str, str] = dict(existing_files)
+                _checklist: list = []
             else:
-                plan = self.architect.architect(sr, blueprint)
+                plan, _checklist = self.architect.architect(sr, blueprint)
                 log.info("generation.architect.done", project_id=project_id, num_files=len(plan.files))
 
                 firestore_service.update_project(uid, project_id, {
@@ -262,7 +790,44 @@ class GenerationOrchestrator:
                 app_slug = template_service.slugify(sr.app_name)
                 scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
                 generated_files = dict(scaffolding)
-                log.info("generation.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
+
+                # Auth mode: False = explicitly disabled, True/None = enabled.
+                _auth_on = sr.auth_required is not False
+
+                # Remove variant-template files — they're reference patterns for
+                # the LLM, not output files for the generated project.
+                for _vf in _NO_AUTH_VARIANT_FILES:
+                    generated_files.pop(_vf, None)
+
+                if _auth_on:
+                    auth_seeded = sorted(_AUTH_SCAFFOLD_FILES & generated_files.keys())
+                    log.info(
+                        "generation.scaffolding.seeded",
+                        project_id=project_id,
+                        num_scaffold=len(scaffolding),
+                        auth_scaffold_files=auth_seeded,
+                    )
+                else:
+                    # Remove auth scaffold files so the LLM cannot import them.
+                    for _af in _AUTH_SCAFFOLD_FILES:
+                        generated_files.pop(_af, None)
+                    # Inject an AUTH_DISABLED note into the plan so the generator
+                    # prompt explicitly knows auth is off for every file it writes.
+                    _auth_disabled_note = (
+                        "AUTH_DISABLED: this app is fully public — no auth scaffold. "
+                        "Do NOT generate LoginPage, RegisterPage, AuthContext, auth "
+                        "routes, JWT code, or any auth-related UI. Navbar has no "
+                        "Sign In / Sign Up / Log out links."
+                    )
+                    plan.notes = (
+                        (plan.notes + "\n\n" + _auth_disabled_note)
+                        if plan.notes else _auth_disabled_note
+                    )
+                    log.info(
+                        "generation.scaffolding.auth_skipped",
+                        project_id=project_id,
+                        reason="auth_disabled_in_requirements",
+                    )
 
                 extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
                 if extras:
@@ -298,20 +863,26 @@ class GenerationOrchestrator:
                         log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
 
                 design_brief = _detect_design_brief(sr)
-                if design_brief["cues"]:
+                if design_brief is not None:
                     _apply_design_brief_to_scaffolding(generated_files, design_brief)
                     brief_note = (
                         "DESIGN BRIEF (apply consistently across every page): "
-                        f"primary color = {design_brief.get('primary_color') or 'default'}; "
+                        f"accent color = {design_brief.get('primary_color') or 'default'}; "
                         f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
-                        "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
-                        "for buttons, links, accents, and highlights — the primary palette has "
-                        "already been swapped to match the requested color."
+                        "Use `bg-accent text-accent-fg hover:bg-accent/90` for primary buttons "
+                        "and `text-accent` for links and icon accents — the --accent CSS variable "
+                        "has been set to the requested color. Surface and text variables remain "
+                        "neutral readable defaults."
                     )
                     try:
                         plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
                     except Exception:
                         pass
+
+                # routes.js must be project-specific — remove scaffold default so
+                # the LLM generates the real, blueprint-derived version.
+                if "frontend/src/lib/routes.js" in plan.generation_order:
+                    generated_files.pop("frontend/src/lib/routes.js", None)
 
                 firestore_service.update_project(uid, project_id, {
                     "generated_files": generated_files,
@@ -334,6 +905,98 @@ class GenerationOrchestrator:
                 })
 
             log.info("generation.generate.done", project_id=project_id, num_files=len(generated_files))
+
+            # ── Contract coverage check + ONE targeted retry ──────────────────
+            # Run immediately after generation so missing endpoints get a second
+            # chance before the test cycle starts. This avoids burning 4 debug
+            # cycles on endpoints the generator simply forgot.
+            api_routes = blueprint.api_routes if hasattr(blueprint, "api_routes") else []
+            if api_routes:
+                misses = _check_contract_coverage(
+                    [r.model_dump() for r in api_routes], generated_files
+                )
+                if misses:
+                    log.warning(
+                        "generator.coverage.missing",
+                        project_id=project_id,
+                        count=len(misses),
+                        endpoints=[f"{m['method']} {m['path']}" for m in misses],
+                    )
+                    # Group misses by the route file that should own them.
+                    import collections as _coll
+                    by_file: dict = _coll.defaultdict(list)
+                    for miss in misses:
+                        by_file[_route_file_for_endpoint(miss)].append(miss)
+
+                    for fp, eps in by_file.items():
+                        existing = generated_files.get(fp, "")
+                        ep_list = "\n".join(
+                            f"  - {ep['method']} {ep['path']}"
+                            + (f"  ({ep.get('description','')})" if ep.get("description") else "")
+                            for ep in eps
+                        )
+                        retry_prompt = (
+                            f"You previously generated {fp}. The contract requires these "
+                            f"additional endpoints that are MISSING from your output:\n{ep_list}\n\n"
+                            f"Current file contents:\n```python\n{existing}\n```\n\n"
+                            "Return the COMPLETE file with the missing endpoints added. "
+                            "Real handlers, not stubs. Keep ALL existing endpoints intact."
+                        )
+                        try:
+                            from app.models.generation_plan import FileToGenerate
+                            ep_summary = ", ".join(
+                                f"{e['method']} {e['path']}" for e in eps
+                            )
+                            stub_file = FileToGenerate(
+                                path=fp,
+                                description=f"Add missing endpoints: {ep_summary}",
+                                depends_on=[],
+                                template="fastapi_route",
+                            )
+                            patched = self.generator.generate_file(
+                                stub_file, plan, blueprint, generated_files,
+                                structured_requirements=sr,
+                            )
+                            if patched and patched.strip():
+                                generated_files[fp] = patched
+                                log.info(
+                                    "generator.coverage.retry_applied",
+                                    project_id=project_id, file=fp,
+                                    endpoints=[f"{e['method']} {e['path']}" for e in eps],
+                                )
+                        except Exception as retry_exc:
+                            log.warning(
+                                "generator.coverage.retry_failed",
+                                project_id=project_id, file=fp, error=str(retry_exc),
+                            )
+
+                    # Re-check after targeted retry.
+                    final_misses = _check_contract_coverage(
+                        [r.model_dump() for r in api_routes], generated_files
+                    )
+                    if final_misses:
+                        log.error(
+                            "generator.coverage.unrecoverable",
+                            project_id=project_id,
+                            count=len(final_misses),
+                            endpoints=[f"{m['method']} {m['path']}" for m in final_misses],
+                            hint=(
+                                "Architect specified endpoints the generator could not produce "
+                                "after one targeted retry. Likely token cap or ambiguous spec. "
+                                "Manual edit or smaller blueprint needed."
+                            ),
+                        )
+                    else:
+                        log.info(
+                            "generator.coverage.retry_resolved",
+                            project_id=project_id,
+                            resolved=len(misses),
+                        )
+
+            upload_fixes = _fix_upload_static_mount({}, generated_files)
+            if upload_fixes:
+                generated_files.update(upload_fixes)
+                log.info("pipeline.upload_static_mount.injected", project_id=project_id)
 
             violations = _scan_color_violations(generated_files)
             if violations:
@@ -372,6 +1035,326 @@ class GenerationOrchestrator:
                 "errors": [str(exc)],
             }
 
+    # ── End-of-cycle hard dedup ───────────────────────────────────────────────
+
+    def _hard_dedup_jsx_files(self, files: dict) -> None:
+        """Remove duplicate top-level function declarations from every .jsx/.tsx/.js
+        file in `files`.  Keeps the FIRST occurrence; deletes subsequent duplicates
+        including their entire body.
+
+        Runs unconditionally at the end of every debug cycle -- this is the final
+        safety net that removes Layout/BareLayout duplicates regardless of which
+        helper introduced them.  Operates in-place on the `files` dict.
+
+        Handles export / export default prefixes so that both
+        'function Layout(' and 'export default function Layout(' are
+        recognised as the same name.
+        """
+        import re as _re
+        _func_re = _re.compile(
+            r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)\s*\(",
+            _re.MULTILINE,
+        )
+
+        for path, content in list(files.items()):
+            if not path.endswith((".jsx", ".tsx", ".js")):
+                continue
+            if not content:
+                continue
+
+            seen: set = set()
+            deletions: list = []
+
+            for m in _func_re.finditer(content):
+                name = m.group(1)
+                if name not in seen:
+                    seen.add(name)
+                    continue
+                # Duplicate — find the matching closing brace
+                ob = content.find("{", m.end())
+                if ob == -1:
+                    continue
+                depth, i = 0, ob
+                while i < len(content):
+                    if content[i] == "{":
+                        depth += 1
+                    elif content[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    i += 1
+                if depth != 0:
+                    continue
+                end = i + 1
+                # Consume trailing newlines / semicolons for a clean deletion
+                while end < len(content) and content[end] in "\n;":
+                    end += 1
+                deletions.append((m.start(), end, name))
+
+            if not deletions:
+                continue
+
+            # Apply deletions from end to start so earlier offsets stay valid
+            deletions.sort(reverse=True)
+            new_content = content
+            removed: list = []
+            for start, end, name in deletions:
+                new_content = new_content[:start] + new_content[end:]
+                removed.append(name)
+
+            if new_content != content:
+                files[path] = new_content
+                log.info(
+                    "cycle.hard_dedup.removed",
+                    path=path,
+                    removed=removed,
+                )
+
+    # ── Re-run tests against already-generated files ─────────────────────────
+
+    def run_test_debug_only(
+        self,
+        uid: str,
+        project_id: str,
+        use_llm_debug: bool = True,
+    ) -> None:
+        """Run ONLY the test+debug cycles against already-generated files.
+
+        Called by the /rerun-tests endpoint.  Never invokes the architect or
+        generator — zero generation tokens spent.  On STRICT failure sets
+        tests_failed_recoverable so the user can iterate again.
+        """
+        try:
+            project = firestore_service.get_project(uid, project_id)
+            if project is None:
+                raise ValueError(f"Project {project_id} not found")
+
+            generated_files: dict[str, str] = dict(project.generated_files or {})
+            if not generated_files:
+                log.error("pipeline.rerun_tests.no_files", project_id=project_id)
+                firestore_service.set_project_status(uid, project_id, ProjectStatus.failed)
+                return
+
+            plan_dict = project.generation_plan
+            if not plan_dict:
+                raise ValueError("No generation plan stored — cannot re-run tests without a plan")
+            plan = GenerationPlan(**plan_dict)
+            blueprint_dict = project.blueprint or {}
+
+            if not use_llm_debug:
+                self.debugger._llm_debug_enabled = False
+
+            log.info(
+                "pipeline.rerun_tests.start",
+                project_id=project_id,
+                num_files=len(generated_files),
+                use_llm_debug=use_llm_debug,
+            )
+
+            # ── Test + debug loop ─────────────────────────────────────────
+            attempt_count: dict[str, int] = {}
+            test_passed = False
+            best_effort = False
+            infra_warning = False
+            warning_msg = ""
+            test_results: dict = {}
+            last_cycle_fixed_files: set[str] = set()
+            last_cycle_failing_checks: set[str] = set()
+
+            for cycle in range(_MAX_TEST_CYCLES):
+                firestore_service.set_project_status(uid, project_id, ProjectStatus.testing)
+                firestore_service.update_project(uid, project_id, {"current_stage": "testing"})
+
+                test_results = self.tester.run_tests(generated_files, plan)
+                log.info(
+                    "pipeline.rerun.test.done",
+                    project_id=project_id,
+                    cycle=cycle + 1,
+                    status=test_results["status"],
+                )
+
+                if test_results["status"] in ("success", "skipped"):
+                    test_passed = True
+                    break
+
+                if not use_llm_debug:
+                    log.info("debug.llm_disabled", cycle=cycle + 1)
+                firestore_service.update_project(uid, project_id, {"current_stage": "debugging"})
+                debug_result = self.debugger.debug_and_fix(
+                    test_results, generated_files, plan, attempt_count
+                )
+
+                if debug_result["status"] == "fixed":
+                    fixed_files = debug_result["fixed_files"]
+                    current_fixed = set(fixed_files.keys())
+                    current_failing = {
+                        c for c, s in test_results.get("passed_checks", {}).items()
+                        if s == "failed"
+                    }
+                    if current_fixed & last_cycle_fixed_files and current_failing == last_cycle_failing_checks:
+                        log.error("pipeline.rerun.fix_loop_no_progress",
+                                  project_id=project_id, cycle=cycle + 1)
+                        break
+                    last_cycle_fixed_files = current_fixed
+                    last_cycle_failing_checks = current_failing
+                    _pre_fix_snap_tdo = {p: generated_files.get(p, "") for p in fixed_files}
+                    generated_files.update(fixed_files)
+                    # Post-cycle duplicate sweep — mirrors run_full_pipeline guard
+                    for _dup_path, _dup_content in list(generated_files.items()):
+                        if not _dup_path.endswith((".jsx", ".tsx", ".js")):
+                            continue
+                        if _dup_path not in fixed_files:
+                            continue
+                        _dups = _detect_duplicate_top_level_decls(_dup_content)
+                        if not _dups:
+                            continue
+                        log.error(
+                            "cycle.duplicate_decls_detected.rolling_back",
+                            project_id=project_id,
+                            path=_dup_path,
+                            duplicates=_dups,
+                        )
+                        _rollback_orig = _pre_fix_snap_tdo.get(_dup_path, "")
+                        if _rollback_orig:
+                            generated_files[_dup_path] = _rollback_orig
+                    # Hard dedup: unconditionally scrub duplicate top-level
+                    # function declarations from every modified JSX file.
+                    self._hard_dedup_jsx_files(generated_files)
+                    attempt_count = debug_result["attempt_counts"]
+                    firestore_service.update_project(uid, project_id,
+                                                     {"generated_files": generated_files})
+                elif debug_result["status"] == "skipped":
+                    reason = debug_result.get("reason", "")
+                    if "infrastructure" in reason.lower():
+                        infra_warning = True
+                        warning_msg = (
+                            "Dependency installation failed. Download the ZIP and "
+                            "install dependencies on your own machine."
+                        )
+                    else:
+                        best_effort = True
+                        warning_msg = (
+                            "Code did not fully pass automated tests. Download the ZIP "
+                            "— small manual fixes may be needed to run locally."
+                        )
+                    test_passed = True
+                    break
+                else:
+                    break  # no progress — fall through to STRICT gate
+
+            # ── STRICT gate ───────────────────────────────────────────────
+            final_checks = (test_results or {}).get("passed_checks", {}) or {}
+            real_failures = {
+                c for c, s in final_checks.items()
+                if s == "failed" and c in _REAL_CHECK_NAMES
+            }
+
+            if not test_passed and real_failures:
+                error_msg = (
+                    f"Tests did not pass after debug attempts: "
+                    f"{', '.join(sorted(real_failures))}. "
+                    "Your generated files are preserved — use 'Re-run Tests' to try "
+                    "again, or 'Regenerate from Scratch' to start fresh."
+                )
+                log.error("pipeline.rerun.strict_failure",
+                          project_id=project_id, real_failures=sorted(real_failures))
+                firestore_service.update_project(uid, project_id, {
+                    "status": ProjectStatus.tests_failed_recoverable,
+                    "current_stage": "testing",
+                    "last_error": error_msg,
+                    "real_failures": sorted(real_failures),
+                    "last_failed_checks": sorted(real_failures),
+                    "test_error_log": (
+                        "\n".join(test_results.get("errors", []) or [])
+                    )[:5000],
+                })
+                _save_snapshot(project_id, generated_files, blueprint_dict,
+                               "final", plan.model_dump())
+                return
+
+            # ── Final STRICT gate (shared with run_full_pipeline) ─────────
+            # Fires even when test_passed=True (e.g., infra-skip path can leave
+            # real failures in passed_checks that the first gate misses).
+            if _apply_strict_gate(
+                test_results, generated_files, blueprint_dict,
+                plan.model_dump(), uid, project_id,
+            ):
+                return  # Firestore already updated by _apply_strict_gate
+
+            # ── Tests passed → verify + deploy ────────────────────────────
+            _verify_strict_rerun = (
+                os.environ.get("DEMAESTRO_VERIFY_STRICT", "true").lower() != "false"
+            )
+            if not best_effort and not infra_warning and not settings.mock_ai:
+                firestore_service.set_project_status(uid, project_id, ProjectStatus.verifying)
+                try:
+                    blueprint_obj = BlueprintResponse(**blueprint_dict)
+                    verify_result = self.verifier.verify(generated_files, plan, blueprint_obj)
+                    if verify_result["status"] == "fail":
+                        issues = verify_result.get("issues", [])
+                        log.warning(
+                            "pipeline.rerun.verify_failed",
+                            project_id=project_id,
+                            num_issues=len(issues),
+                        )
+                        if _verify_strict_rerun:
+                            raise RuntimeError(f"Verification failed: {issues}")
+                        else:
+                            best_effort = True
+                            warning_msg = "Verify found issues -- set DEMAESTRO_VERIFY_STRICT=false to bypass."
+                except RuntimeError:
+                    raise
+                except Exception as _ve:
+                    log.warning("pipeline.rerun.verify_error", project_id=project_id,
+                                error=str(_ve))
+                    best_effort = True
+                    warning_msg = "Verification skipped -- code may need manual review."
+
+            firestore_service.set_project_status(uid, project_id, ProjectStatus.packaging)
+            sr = firestore_service.get_latest_structured_requirements(uid, project_id)
+            try:
+                blueprint_obj = BlueprintResponse(**blueprint_dict)
+                pages_md = _build_pages_md(
+                    blueprint_obj,
+                    (sr.app_name if sr else None) or project_id,
+                    auth_enabled=(sr.auth_required is not False) if sr else True,
+                )
+                generated_files["PAGES.md"] = pages_md
+            except Exception:
+                pass  # PAGES.md is informational; never let it block packaging
+
+            deploy_result = self.deployer.deploy(
+                uid, project_id, generated_files, plan,
+                app_name=(sr.app_name if sr else None),
+            )
+            if deploy_result["status"] != "ready":
+                raise RuntimeError(f"Packaging failed: {deploy_result.get('errors', [])}")
+
+            final_status = (
+                ProjectStatus.ready_with_warnings
+                if (best_effort or infra_warning)
+                else ProjectStatus.ready
+            )
+            firestore_service.update_project(uid, project_id, {
+                "generated_files": generated_files,
+                "status": final_status,
+                "current_stage": "ready",
+                "zip_url": deploy_result["zip_url"],
+                "last_error": warning_msg or None,
+            })
+            _save_snapshot(project_id, generated_files, blueprint_dict,
+                           "final", plan.model_dump())
+            log.info("pipeline.rerun_tests.done", project_id=project_id,
+                     zip_url=deploy_result["zip_url"])
+
+        except Exception as exc:
+            log.error("pipeline.rerun_tests.error",
+                      project_id=project_id, error=str(exc))
+            firestore_service.update_project(uid, project_id, {
+                "status": ProjectStatus.tests_failed_recoverable,
+                "last_error": str(exc),
+            })
+
     # ── W5-P2 full pipeline ──────────────────────────────────────────────────
 
     def run_full_pipeline(self, uid: str, project_id: str) -> dict:
@@ -379,7 +1362,122 @@ class GenerationOrchestrator:
 
         Returns: { status, zip_url, generated_files, errors }
         """
+        from app.config import get_agent_model, estimate_cost_usd, PRICING_PER_MILLION_TOKENS
+
+        _mark_active(project_id)
+        clear_cancellation(project_id)
+
         log.info("pipeline.start", project_id=project_id)
+        _pipeline_started_at = datetime.now(timezone.utc)
+        _debug_files_touched: list[str] = []
+        _cycle_count = 0
+
+        def _agent_tokens(agent_name: str) -> dict:
+            """Return token usage for a named agent, or zeros if the agent
+            doesn't exist on this orchestrator instance (e.g. modifier).
+
+            Always returns the four-bucket shape expected by estimate_cost_usd:
+            input_uncached, cache_write, cache_read, output, calls.
+            Agents without caching (architect, tester, verifier) will have
+            cache_write=0 and cache_read=0.
+            """
+            _zero = {
+                "input_uncached": 0, "cache_write": 0,
+                "cache_read": 0, "output": 0, "calls": 0,
+            }
+            _agent = getattr(self, agent_name, None)
+            if _agent is None:
+                return _zero
+            _counter = getattr(_agent, "token_counter", None)
+            if _counter is None:
+                return _zero
+            if isinstance(_counter, dict):
+                return {
+                    "input_uncached": int(_counter.get("input", 0)),
+                    "cache_write":    int(_counter.get("cache_write", 0)),
+                    "cache_read":     int(_counter.get("cache_read", 0)),
+                    "output":         int(_counter.get("output", 0)),
+                    "calls":          int(_counter.get("calls", 0)),
+                }
+            return {
+                "input_uncached": int(getattr(_counter, "input", 0)),
+                "cache_write":    int(getattr(_counter, "cache_write", 0)),
+                "cache_read":     int(getattr(_counter, "cache_read", 0)),
+                "output":         int(getattr(_counter, "output", 0)),
+                "calls":          int(getattr(_counter, "calls", 0)),
+            }
+
+        def _agent_model(agent_name: str) -> str:
+            """Return the model string for a named agent, or 'n/a' if absent."""
+            _agent = getattr(self, agent_name, None)
+            if _agent is None:
+                return "n/a"
+            return getattr(_agent, "model", "n/a")
+
+        def _write_generation_metrics(final_status: str, **extra) -> None:
+            """Persist cost + quality telemetry to the project doc.
+
+            This function MUST NEVER raise — a metrics-writer failure must not
+            taint a successful pipeline result.  All exceptions are swallowed
+            and logged at ERROR level for operator review.
+            """
+            try:
+                finished = datetime.now(timezone.utc)
+                _agent_names = ("architect", "generator", "debugger",
+                                "verifier", "modifier", "tester")
+                tokens = {name: _agent_tokens(name) for name in _agent_names}
+                models = {name: _agent_model(name) for name in _agent_names}
+                # Supplement with get_agent_model() for agents with token tracking
+                for name in ("architect", "generator", "debugger", "modifier"):
+                    if models[name] == "n/a":
+                        models[name] = get_agent_model(name)
+                cost = estimate_cost_usd(tokens, models)
+                # Cache savings: tokens read from cache would have cost
+                # input_rate / MTok at full price; they were billed at 0.1×.
+                # Net savings = cache_read × 0.9 × generator_input_rate.
+                _total_cache_read = sum(
+                    b.get("cache_read", 0) for b in tokens.values()
+                )
+                _gen_model = models.get("generator", "claude-sonnet-4-6")
+                _gen_input_rate = (
+                    PRICING_PER_MILLION_TOKENS
+                    .get(_gen_model, PRICING_PER_MILLION_TOKENS["claude-sonnet-4-6"])
+                    ["input"]
+                )
+                cache_savings_estimate = round(
+                    _total_cache_read / 1_000_000 * 0.9 * _gen_input_rate, 4
+                )
+                _debugger = getattr(self, "debugger", None)
+                validator_rejections = int(
+                    getattr(_debugger, "validator_rejections", 0)
+                ) if _debugger is not None else 0
+                metrics = {
+                    "generation_metrics": {
+                        "started_at": _pipeline_started_at.isoformat(),
+                        "finished_at": finished.isoformat(),
+                        "duration_sec": int(
+                            (finished - _pipeline_started_at).total_seconds()
+                        ),
+                        "cycle_count": _cycle_count,
+                        "final_status": final_status,
+                        "tokens_by_agent": tokens,
+                        "models_used_by_agent": models,
+                        "debugger_validator_rejections": validator_rejections,
+                        "debug_files_touched": _debug_files_touched,
+                        **extra,
+                    },
+                    "estimated_cost_usd": cost,
+                    "cache_savings_estimate": cache_savings_estimate,
+                }
+                firestore_service.update_project(uid, project_id, metrics)
+            except Exception as _metrics_exc:
+                log.error(
+                    "generation_metrics.write_failed",
+                    project_id=project_id,
+                    exc_type=type(_metrics_exc).__name__,
+                    exc=str(_metrics_exc),
+                )
+                # SWALLOW — metrics failure must not affect pipeline status.
 
         try:
             project = firestore_service.get_project(uid, project_id)
@@ -409,19 +1507,68 @@ class GenerationOrchestrator:
             if resuming:
                 plan = GenerationPlan(**existing_plan)
                 generated_files: dict[str, str] = dict(existing_files)
+                _checklist_full: list = []
             else:
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.generating)
-                plan = self.architect.architect(sr, blueprint)
+                plan, _checklist_full = self.architect.architect(sr, blueprint)
                 log.info("pipeline.architect.done", project_id=project_id, num_files=len(plan.files))
 
                 firestore_service.update_project(uid, project_id, {
                     "generation_plan": plan.model_dump(),
+                    "checklist": [_item_to_dict(i) for i in _checklist_full],
+                    "checklist_results": [
+                        {"item_id": getattr(i, "id", "?"), "status": "pending", "reason": ""}
+                        for i in _checklist_full
+                    ],
                 })
+
+                # Cancellation checkpoint: after architect
+                if is_cancelled(project_id):
+                    log.info("pipeline.cancelled_by_user", project_id=project_id, at_phase="post_architect")
+                    firestore_service.update_project(uid, project_id, {
+                        "status": ProjectStatus.stopped,
+                        "current_stage": "stopped",
+                        "last_error": "Generation stopped by user.",
+                    })
+                    return {"status": "cancelled", "zip_url": None, "generated_files": {}, "errors": []}
 
                 app_slug = template_service.slugify(sr.app_name)
                 scaffolding = template_service.load_stack_templates(plan.technology_stack, sr.app_name, app_slug)
                 generated_files = dict(scaffolding)
-                log.info("pipeline.scaffolding.seeded", project_id=project_id, num_scaffold=len(scaffolding))
+
+                # Auth mode: False = explicitly disabled, True/None = enabled.
+                _auth_on = sr.auth_required is not False
+
+                # Remove variant-template files — reference patterns, not output.
+                for _vf in _NO_AUTH_VARIANT_FILES:
+                    generated_files.pop(_vf, None)
+
+                if _auth_on:
+                    auth_seeded = sorted(_AUTH_SCAFFOLD_FILES & generated_files.keys())
+                    log.info(
+                        "pipeline.scaffolding.seeded",
+                        project_id=project_id,
+                        num_scaffold=len(scaffolding),
+                        auth_scaffold_files=auth_seeded,
+                    )
+                else:
+                    for _af in _AUTH_SCAFFOLD_FILES:
+                        generated_files.pop(_af, None)
+                    _auth_disabled_note = (
+                        "AUTH_DISABLED: this app is fully public — no auth scaffold. "
+                        "Do NOT generate LoginPage, RegisterPage, AuthContext, auth "
+                        "routes, JWT code, or any auth-related UI. Navbar has no "
+                        "Sign In / Sign Up / Log out links."
+                    )
+                    plan.notes = (
+                        (plan.notes + "\n\n" + _auth_disabled_note)
+                        if plan.notes else _auth_disabled_note
+                    )
+                    log.info(
+                        "pipeline.scaffolding.auth_skipped",
+                        project_id=project_id,
+                        reason="auth_disabled_in_requirements",
+                    )
 
                 extras = [d.strip() for d in (plan.extra_dependencies or []) if d and d.strip()]
                 if extras:
@@ -457,20 +1604,26 @@ class GenerationOrchestrator:
                         log.warning("pipeline.frontend_deps_merge_failed", project_id=project_id, error=str(exc))
 
                 design_brief = _detect_design_brief(sr)
-                if design_brief["cues"]:
+                if design_brief is not None:
                     _apply_design_brief_to_scaffolding(generated_files, design_brief)
                     brief_note = (
                         "DESIGN BRIEF (apply consistently across every page): "
-                        f"primary color = {design_brief.get('primary_color') or 'default'}; "
+                        f"accent color = {design_brief.get('primary_color') or 'default'}; "
                         f"vibe = {design_brief.get('vibe') or 'clean and modern'}. "
-                        "Use the standard Tailwind `primary-*` classes (primary-50 .. primary-900) "
-                        "for buttons, links, accents, and highlights — the primary palette has "
-                        "already been swapped to match the requested color."
+                        "Use `bg-accent text-accent-fg hover:bg-accent/90` for primary buttons "
+                        "and `text-accent` for links and icon accents — the --accent CSS variable "
+                        "has been set to the requested color. Surface and text variables remain "
+                        "neutral readable defaults."
                     )
                     try:
                         plan.notes = (plan.notes + "\n\n" + brief_note) if plan.notes else brief_note
                     except Exception:
                         pass
+
+                # routes.js must be project-specific — remove scaffold default so
+                # the LLM generates the real, blueprint-derived version.
+                if "frontend/src/lib/routes.js" in plan.generation_order:
+                    generated_files.pop("frontend/src/lib/routes.js", None)
 
                 firestore_service.update_project(uid, project_id, {
                     "generated_files": generated_files,
@@ -503,6 +1656,20 @@ class GenerationOrchestrator:
                 firestore_service.update_project(uid, project_id, {
                     "generated_files": generated_files,
                 })
+                # Cancellation checkpoint: every 5 files during generation
+                if idx % 5 == 4 and is_cancelled(project_id):
+                    log.info("pipeline.cancelled_by_user", project_id=project_id, at_phase="generating")
+                    firestore_service.update_project(uid, project_id, {
+                        "status": ProjectStatus.stopped,
+                        "current_stage": "stopped",
+                        "last_error": "Generation stopped by user.",
+                    })
+                    return {
+                        "status": "cancelled",
+                        "zip_url": None,
+                        "generated_files": generated_files,
+                        "errors": [],
+                    }
 
             firestore_service.update_project(uid, project_id, {
                 "generation_plan": plan.model_dump(),
@@ -511,6 +1678,12 @@ class GenerationOrchestrator:
                 "current_file": None,
             })
             log.info("pipeline.generate.done", project_id=project_id, num_files=len(generated_files))
+
+            upload_fixes = _fix_upload_static_mount({}, generated_files)
+            if upload_fixes:
+                generated_files.update(upload_fixes)
+                firestore_service.update_project(uid, project_id, {"generated_files": generated_files})
+                log.info("pipeline.upload_static_mount.injected", project_id=project_id)
 
             violations = _scan_color_violations(generated_files)
             if violations:
@@ -526,6 +1699,101 @@ class GenerationOrchestrator:
                     + "\n".join(f"- {v}" for v in violations[:20])
                 )
 
+            _save_snapshot(project_id, generated_files, blueprint_dict,
+                           "post_generate", plan.model_dump())
+
+            # ── Checklist coverage pass + targeted regen ─────────────────────
+            # Runs once immediately after generation before the test loop.
+            # This fills gaps before the test harness fires, saving debug cycles.
+            if _checklist_full:
+                try:
+                    _cl_results = run_checklist(
+                        _checklist_full, generated_files, {}, ""
+                    )
+                    firestore_service.update_project(uid, project_id, {
+                        "checklist_results": _checklist_results_to_payload(_cl_results),
+                    })
+
+                    # Import-resolution gate: catch bad app.X imports before
+                    # the test loop fires, saving a full test+debug cycle.
+                    _import_failures = check_import_resolution(generated_files)
+                    if _import_failures:
+                        log.warning(
+                            "checklist.import_failures",
+                            project_id=project_id,
+                            count=len(_import_failures),
+                            failures=[r.reason for r in _import_failures[:5]],
+                        )
+                        _import_patches = self.debugger.run_algorithmic_fixes(
+                            generated_files, test_results=None,
+                        )
+                        if _import_patches:
+                            log.info(
+                                "checklist.import_autofix_applied",
+                                project_id=project_id,
+                                files=_import_patches,
+                            )
+
+                    _cl_failed = [r for r in _cl_results if r.status == "fail"]
+                    if _cl_failed:
+                        log.info(
+                            "checklist.targeted_regen.start",
+                            project_id=project_id,
+                            failed_count=len(_cl_failed),
+                        )
+                        _cl_by_id = {getattr(i, "id"): i for i in _checklist_full}
+                        for _cr in _cl_failed:
+                            _item = _cl_by_id.get(_cr.item_id)
+                            if _item is None:
+                                continue
+                            try:
+                                _patches = self.generator.generate_single_item(
+                                    _item, generated_files
+                                )
+                                if _patches:
+                                    generated_files.update(_patches)
+                                    log.info(
+                                        "checklist.targeted_regen.applied",
+                                        project_id=project_id,
+                                        item_id=_cr.item_id,
+                                        patched=list(_patches.keys()),
+                                    )
+                            except Exception as _regen_exc:
+                                log.warning(
+                                    "checklist.targeted_regen_failed",
+                                    project_id=project_id,
+                                    item_id=_cr.item_id,
+                                    error=str(_regen_exc),
+                                )
+                        # Re-run the checklist after targeted regen.
+                        _cl_final = run_checklist(
+                            _checklist_full, generated_files, {}, ""
+                        )
+                        firestore_service.update_project(uid, project_id, {
+                            "checklist_results": _checklist_results_to_payload(_cl_final),
+                        })
+                        _still_failed = [r for r in _cl_final if r.status == "fail"]
+                        if _still_failed:
+                            log.info(
+                                "checklist.after_regen",
+                                project_id=project_id,
+                                still_failing=[r.item_id for r in _still_failed],
+                            )
+                        else:
+                            log.info(
+                                "checklist.all_resolved",
+                                project_id=project_id,
+                            )
+                        firestore_service.update_project(uid, project_id, {
+                            "generated_files": generated_files,
+                        })
+                except Exception as _cl_exc:
+                    log.warning(
+                        "checklist.pass_failed",
+                        project_id=project_id,
+                        error=str(_cl_exc),
+                    )
+
             # ── STEP 2: Test + Debug loop ────────────────────────────────────
             attempt_count: dict[str, int] = {}
             test_passed = False
@@ -533,10 +1801,18 @@ class GenerationOrchestrator:
             infra_warning = False
             warning_msg = ""
             test_results: dict = {}
+            last_cycle_fixed_files: set[str] = set()
+            last_cycle_failing_checks: set[str] = set()
+            no_progress_cycles: int = 0
+            _prev_cycle_import_diffs: dict[str, dict] = {}
+            _last_rollback_signature: tuple | None = None
+            _agentic_invocations: int = 0
+            _MAX_AGENTIC_INVOCATIONS = 5
 
             for cycle in range(_MAX_TEST_CYCLES):
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.testing)
                 firestore_service.update_project(uid, project_id, {"current_stage": "testing"})
+                _cycle_count = cycle + 1
 
                 test_results = self.tester.run_tests(generated_files, plan)
                 log.info(
@@ -578,7 +1854,63 @@ class GenerationOrchestrator:
                     test_passed = True
                     break
 
+                # Cancellation checkpoint: after test cycle
+                if is_cancelled(project_id):
+                    log.info("pipeline.cancelled_by_user", project_id=project_id, at_phase="post_test")
+                    firestore_service.update_project(uid, project_id, {
+                        "status": ProjectStatus.stopped,
+                        "current_stage": "stopped",
+                        "last_error": "Generation stopped by user.",
+                    })
+                    return {
+                        "status": "cancelled",
+                        "zip_url": None,
+                        "generated_files": generated_files,
+                        "errors": [],
+                    }
+
+                # ── Aggressive agentic trigger ────────────────────────────────
+                # If a REAL check still fails after the first cycle, invoke the
+                # agentic fallback proactively before the next algorithmic pass.
+                _REAL_CHECK_NAMES_PROACTIVE = {
+                    "boot", "lint", "frontend_build", "smoke",
+                    "reachability", "contract",
+                }
+                _current_passed = test_results.get("passed_checks", {})
+                _real_failing_now = {
+                    c for c in _REAL_CHECK_NAMES_PROACTIVE
+                    if _current_passed.get(c) == "failed"
+                }
+                if cycle >= 1 and _real_failing_now and _agentic_invocations < _MAX_AGENTIC_INVOCATIONS:
+                    _agentic_invocations += 1
+                    log.info(
+                        "pipeline.agentic_fallback.proactive_trigger",
+                        project_id=project_id,
+                        cycle=cycle + 1,
+                        invocation=_agentic_invocations,
+                        real_failing=sorted(_real_failing_now),
+                    )
+                    agentic_fixes = self.debugger._agentic_holistic_fix(
+                        test_results, generated_files,
+                    )
+                    if agentic_fixes:
+                        generated_files.update(agentic_fixes)
+                        firestore_service.update_project(uid, project_id, {
+                            "generated_files": generated_files,
+                        })
+                        log.info(
+                            "pipeline.agentic_fallback.applied_proactive",
+                            project_id=project_id,
+                            patched=list(agentic_fixes.keys()),
+                        )
+                        no_progress_cycles = 0
+                        last_cycle_fixed_files = set()
+                        last_cycle_failing_checks = set()
+                        continue  # re-test immediately with agentic patches
+
                 firestore_service.update_project(uid, project_id, {"current_stage": "debugging"})
+                if not USE_LLM_DEBUG:
+                    log.info("debug.llm_disabled", cycle=cycle + 1)
                 debug_result = self.debugger.debug_and_fix(
                     test_results, generated_files, plan, attempt_count
                 )
@@ -590,8 +1922,294 @@ class GenerationOrchestrator:
                 )
 
                 if debug_result["status"] == "fixed":
-                    generated_files.update(debug_result["fixed_files"])
+                    fixed_files = debug_result["fixed_files"]
+                    current_fixed_files = set(fixed_files.keys())
+                    current_failing_checks = {
+                        c for c, s in test_results.get("passed_checks", {}).items()
+                        if s == "failed"
+                    }
+
+                    # ── No-progress guard ────────────────────────────────────
+                    # Two conditions that both indicate the debug loop is stuck:
+                    #   A) Same checks still failing AND same files were "fixed"
+                    #      (classic: debugger re-applies the same non-working patch)
+                    #   B) Same checks still failing for 2 consecutive cycles
+                    #      (even with different files: the LLM keeps trying new
+                    #      approaches but nothing lands)
+                    overlap = current_fixed_files & last_cycle_fixed_files
+                    checks_stalled = (
+                        current_failing_checks
+                        and current_failing_checks == last_cycle_failing_checks
+                    )
+
+                    if checks_stalled:
+                        if current_failing_checks == {"typecheck"} and no_progress_cycles < 1:
+                            # Typecheck-only failures often need a second pass to settle
+                            # (mypy fixes are subtle; give 2 cycles max before declaring no-progress).
+                            log.info(
+                                "fix_loop.typecheck_only_extra_cycle",
+                                project_id=project_id,
+                                cycle=cycle + 1,
+                                no_progress_cycles=no_progress_cycles,
+                            )
+                            no_progress_cycles += 1
+                        elif overlap or no_progress_cycles >= 0 or current_failing_checks:
+                            # Either the same files keep being touched (immediate signal),
+                            # OR checks stalled for a second consecutive cycle (2-cycle limit),
+                            # OR there are still failing checks after a "fixed" result.
+                            # Try the agentic holistic fallback before giving up.
+                            if _agentic_invocations < _MAX_AGENTIC_INVOCATIONS:
+                                _agentic_invocations += 1
+                                log.info(
+                                    "pipeline.agentic_fallback.triggering",
+                                    project_id=project_id,
+                                    cycle=cycle + 1,
+                                    invocation=_agentic_invocations,
+                                )
+                                agentic_fixes = self.debugger._agentic_holistic_fix(
+                                    test_results, generated_files,
+                                )
+                                if agentic_fixes:
+                                    generated_files.update(agentic_fixes)
+                                    firestore_service.update_project(uid, project_id, {
+                                        "generated_files": generated_files,
+                                    })
+                                    log.info(
+                                        "pipeline.agentic_fallback.applied",
+                                        project_id=project_id,
+                                        patched=list(agentic_fixes.keys()),
+                                    )
+                                    no_progress_cycles = 0
+                                    last_cycle_fixed_files = set()
+                                    last_cycle_failing_checks = set()
+                                    continue  # re-test with patches applied
+                                else:
+                                    log.warning(
+                                        "pipeline.agentic_fallback.no_patches",
+                                        project_id=project_id,
+                                        cycle=cycle + 1,
+                                    )
+
+                            human_msg = (
+                                f"Fix loop made no progress after {cycle + 1} cycle(s). "
+                                f"Failing checks: {sorted(current_failing_checks)}. "
+                            )
+                            if overlap:
+                                human_msg += (
+                                    f"The same files were repeatedly patched without effect: "
+                                    f"{sorted(overlap)}. "
+                                )
+                            human_msg += (
+                                "Use 'Regenerate from Scratch' or edit the blueprint to "
+                                "simplify the endpoints that could not be synthesized."
+                            )
+                            log.error(
+                                "pipeline.fix_loop_no_progress",
+                                project_id=project_id,
+                                cycle=cycle + 1,
+                                repeated_fixes=sorted(overlap),
+                                failing_checks=sorted(current_failing_checks),
+                                no_progress_cycles=no_progress_cycles,
+                                human_msg=human_msg,
+                            )
+                            break  # short-circuit: test_passed stays False → STRICT failure
+                        else:
+                            # First cycle with stalled checks — allow one more before aborting.
+                            no_progress_cycles += 1
+                    else:
+                        no_progress_cycles = 0  # reset when checks actually change
+
+                    last_cycle_fixed_files = current_fixed_files
+                    last_cycle_failing_checks = current_failing_checks
+                    # Snapshot originals before applying fixes for corruption rollback
+                    _pre_fix_snapshot = {p: generated_files.get(p, "") for p in fixed_files}
+
+                    # ── Import-oscillation detection ──────────────────────
+                    # If cycle N added import X and cycle N+1 removes it (or vice
+                    # versa), the fixers are undoing each other — abort rather than
+                    # burning more cycles.
+                    _cur_import_diffs: dict[str, dict] = {
+                        p: _diff_imports(_pre_fix_snapshot.get(p, ""), new_fc)
+                        for p, new_fc in fixed_files.items()
+                    }
+                    for _osc_path, _cur_diff in _cur_import_diffs.items():
+                        _prev_diff = _prev_cycle_import_diffs.get(_osc_path, {})
+                        _oscillating = [
+                            imp for imp in _cur_diff.get("added", [])
+                            if imp in _prev_diff.get("removed", [])
+                        ] + [
+                            imp for imp in _cur_diff.get("removed", [])
+                            if imp in _prev_diff.get("added", [])
+                        ]
+                        if _oscillating:
+                            _osc_imp = _oscillating[0]
+                            _mh = _re.search(r"import\s+(\w+)", _osc_imp)
+                            _mname = _mh.group(1) if _mh else "a referenced model"
+                            _osc_msg = (
+                                f"Generation failed: a missing dependency in "
+                                f"{_osc_path} cannot be auto-fixed safely "
+                                f"({_osc_imp!r} oscillation). The blueprint may "
+                                f"reference {_mname} which doesn't exist in the "
+                                "data model. Edit requirements to remove the "
+                                "unsupported feature or click Retry."
+                            )
+                            log.error(
+                                "fix_loop.import_oscillation",
+                                project_id=project_id,
+                                file=_osc_path,
+                                oscillating_import=_osc_imp,
+                                cycles=[cycle, cycle + 1],
+                            )
+                            firestore_service.update_project(uid, project_id, {
+                                "status": ProjectStatus.failed,
+                                "current_stage": "generating",
+                                "error_message": _osc_msg,
+                                "last_error": _osc_msg,
+                            })
+                            _write_generation_metrics(
+                                "import_oscillation",
+                                oscillating_import=_osc_imp,
+                                oscillating_file=_osc_path,
+                            )
+                            return {
+                                "status": "error",
+                                "zip_url": None,
+                                "generated_files": generated_files,
+                                "errors": [_osc_msg],
+                            }
+                    _prev_cycle_import_diffs = _cur_import_diffs
+
+                    generated_files.update(fixed_files)
+
+                    # ── Post-cycle duplicate-declaration sweep ────────────────
+                    # Unconditional safety net: rolls back any JSX file where
+                    # this cycle introduced duplicate top-level declarations
+                    # (e.g. two helpers both injecting function Layout()).
+                    # Uses _pre_fix_snapshot so only this cycle's damage reverts.
+                    for _dup_path, _dup_content in list(generated_files.items()):
+                        if not _dup_path.endswith((".jsx", ".tsx", ".js")):
+                            continue
+                        if _dup_path not in fixed_files:
+                            continue  # not touched this cycle
+                        _dups = _detect_duplicate_top_level_decls(_dup_content)
+                        if not _dups:
+                            continue
+                        log.error(
+                            "cycle.duplicate_decls_detected.rolling_back",
+                            project_id=project_id,
+                            path=_dup_path,
+                            duplicates=_dups,
+                        )
+                        _rollback_orig = _pre_fix_snapshot.get(_dup_path, "")
+                        if _rollback_orig:
+                            generated_files[_dup_path] = _rollback_orig
+
+                    # Hard dedup: unconditionally scrub duplicate top-level
+                    # function declarations from every modified JSX file.
+                    self._hard_dedup_jsx_files(generated_files)
+
                     attempt_count = debug_result["attempt_counts"]
+                    # Track which files the debugger touched for telemetry.
+                    for _fpath in fixed_files:
+                        if _fpath not in _debug_files_touched:
+                            _debug_files_touched.append(_fpath)
+                    # Corruption guard: if any LLM-modified Python file no longer
+                    # parses, roll it back and fast-track to no-progress failure.
+                    import ast as _ast
+                    _corruption_detected = False
+                    for _fpath, _new_content in fixed_files.items():
+                        if not _fpath.endswith(".py") or not _new_content:
+                            continue
+                        try:
+                            _ast.parse(_new_content)
+                        except SyntaxError:
+                            _orig = _pre_fix_snapshot.get(_fpath, "")
+                            log.error(
+                                "fix_loop.llm_corrupted_file",
+                                project_id=project_id,
+                                file=_fpath,
+                                preview=_new_content[:200],
+                            )
+                            if _orig:
+                                generated_files[_fpath] = _orig
+                            _corruption_detected = True
+                    if _corruption_detected:
+                        no_progress_cycles = 2
+                        log.error(
+                            "fix_loop.skipped_due_to_corruption",
+                            project_id=project_id,
+                        )
+                    # Post-fix static validation: catch "used but not imported" bugs
+                    # and roll back any file whose content is no longer valid Python.
+                    _post_fix_validate(
+                        generated_files,
+                        list(fixed_files.keys()),
+                        _pre_fix_snapshot,
+                    )
+
+                    # ── Rollback loop detection ────────────────────────────────
+                    # If _validate_or_rollback fires for the same file with the
+                    # same reason on two consecutive cycles, the helper is stuck
+                    # in a broken-inject→rollback loop. Abort immediately rather
+                    # than burning more LLM cycles.
+                    _rollbacks_this_cycle: list[tuple] = []
+                    for _rp, _rc in generated_files.items():
+                        if _rp in _pre_fix_snapshot and _rc == _pre_fix_snapshot[_rp]:
+                            if _rp in fixed_files and fixed_files[_rp] != _rc:
+                                # File was "fixed" but content matches pre-cycle — rolled back.
+                                _rollbacks_this_cycle.append((_rp, "rolled_back"))
+                    _rollback_sig = tuple(sorted(_rollbacks_this_cycle))
+                    if _rollback_sig and _rollback_sig == _last_rollback_signature:
+                        _rb_msg = (
+                            f"Rollback loop detected after cycle {cycle + 1}: "
+                            f"the same file(s) are being broken and rolled back every cycle: "
+                            f"{[r[0] for r in _rollback_sig]}. "
+                            "A helper is producing invalid output for these files. "
+                            "Use 'Regenerate from Scratch' or edit the blueprint."
+                        )
+                        log.error(
+                            "pipeline.rollback_loop_detected",
+                            project_id=project_id,
+                            signature=[r[0] for r in _rollback_sig],
+                            cycle=cycle + 1,
+                            hint=_rb_msg,
+                        )
+                        no_progress_cycles = 2  # force the no-progress exit on next check
+                    _last_rollback_signature = _rollback_sig
+                    # Persist fixed files to Firestore so resumed pipelines see the latest state
+                    changed_files = list(fixed_files.keys())
+                    try:
+                        firestore_service.update_project(uid, project_id, {"generated_files": generated_files})
+                        persisted_files = changed_files
+                    except Exception as persist_exc:
+                        persisted_files = []
+                        log.error("pipeline.debug.persist_failed", project_id=project_id, error=str(persist_exc))
+                    log.info(
+                        "debugger.persistence.verify",
+                        files_mutated_in_memory=changed_files,
+                        files_persisted_to_store=persisted_files,
+                    )
+                    if set(changed_files) != set(persisted_files):
+                        log.error(
+                            "debugger.persistence.mismatch",
+                            mutated_not_persisted=sorted(set(changed_files) - set(persisted_files)),
+                        )
+                    _save_snapshot(project_id, generated_files, blueprint_dict,
+                                   f"post_cycle_{_cycle_count}", plan.model_dump())
+                    # Cancellation checkpoint: after debug cycle
+                    if is_cancelled(project_id):
+                        log.info("pipeline.cancelled_by_user", project_id=project_id, at_phase="post_debug")
+                        firestore_service.update_project(uid, project_id, {
+                            "status": ProjectStatus.stopped,
+                            "current_stage": "stopped",
+                            "last_error": "Generation stopped by user.",
+                        })
+                        return {
+                            "status": "cancelled",
+                            "zip_url": None,
+                            "generated_files": generated_files,
+                            "errors": [],
+                        }
                 elif debug_result["status"] == "skipped":
                     reason = debug_result.get("reason", "")
                     if "infrastructure" in reason.lower():
@@ -602,6 +2220,42 @@ class GenerationOrchestrator:
                             "Download the ZIP and try installing dependencies on your own machine."
                         )
                     else:
+                        # ── Agentic fallback: algorithmic debugger gave up; try the LLM
+                        # agent before bailing to best-effort. ──────────────────────────
+                        if _agentic_invocations < _MAX_AGENTIC_INVOCATIONS:
+                            _agentic_invocations += 1
+                            log.info(
+                                "pipeline.agentic_fallback.triggering_from_skipped",
+                                project_id=project_id,
+                                cycle=cycle + 1,
+                                invocation=_agentic_invocations,
+                                skipped_reason=reason,
+                            )
+                            agentic_fixes = self.debugger._agentic_holistic_fix(
+                                test_results, generated_files,
+                            )
+                            if agentic_fixes:
+                                generated_files.update(agentic_fixes)
+                                firestore_service.update_project(uid, project_id, {
+                                    "generated_files": generated_files,
+                                })
+                                log.info(
+                                    "pipeline.agentic_fallback.applied_from_skipped",
+                                    project_id=project_id,
+                                    patched=list(agentic_fixes.keys()),
+                                )
+                                no_progress_cycles = 0
+                                last_cycle_fixed_files = set()
+                                last_cycle_failing_checks = set()
+                                continue  # back to test cycle with patches applied
+                            else:
+                                log.warning(
+                                    "pipeline.agentic_fallback.no_patches_from_skipped",
+                                    project_id=project_id,
+                                    cycle=cycle + 1,
+                                )
+
+                        # Only if agentic also couldn't help: bail to best_effort.
                         log.warning("pipeline.debug.cannot_auto_fix", project_id=project_id, cycle=cycle + 1, reason=reason)
                         best_effort = True
                         _test_summary = ", ".join(
@@ -616,7 +2270,39 @@ class GenerationOrchestrator:
                     test_passed = True
                     break
                 else:
-                    # Debug could not identify or fix the file — package best-effort anyway.
+                    # Debug could not identify or fix the file — try agentic before bailing.
+                    if _agentic_invocations < _MAX_AGENTIC_INVOCATIONS:
+                        _agentic_invocations += 1
+                        log.info(
+                            "pipeline.agentic_fallback.triggering_from_cannot_fix",
+                            project_id=project_id,
+                            cycle=cycle + 1,
+                            invocation=_agentic_invocations,
+                        )
+                        agentic_fixes = self.debugger._agentic_holistic_fix(
+                            test_results, generated_files,
+                        )
+                        if agentic_fixes:
+                            generated_files.update(agentic_fixes)
+                            firestore_service.update_project(uid, project_id, {
+                                "generated_files": generated_files,
+                            })
+                            log.info(
+                                "pipeline.agentic_fallback.applied_from_cannot_fix",
+                                project_id=project_id,
+                                patched=list(agentic_fixes.keys()),
+                            )
+                            no_progress_cycles = 0
+                            last_cycle_fixed_files = set()
+                            last_cycle_failing_checks = set()
+                            continue  # re-test with patches applied
+                        else:
+                            log.warning(
+                                "pipeline.agentic_fallback.no_patches_from_cannot_fix",
+                                project_id=project_id,
+                                cycle=cycle + 1,
+                            )
+
                     log.warning(
                         "pipeline.debug.cannot_fix",
                         project_id=project_id,
@@ -625,22 +2311,34 @@ class GenerationOrchestrator:
                     )
                     break  # test_passed stays False → best_effort block below
 
-            # Identify which failed checks are environmental vs real code/contract bugs.
+            # STRICT vs advisory classification (uses module-level _REAL_CHECK_NAMES).
+            _ADVISORY_CHECK_NAMES = {"typecheck", "smoke"}
             final_checks = (test_results or {}).get("passed_checks", {}) or {}
             real_failures = {
                 check for check, st in final_checks.items()
-                if st == "failed" and check not in ("smoke", "typecheck")
+                if st == "failed" and check in _REAL_CHECK_NAMES
             }
+            advisory_failures = {
+                check for check, st in final_checks.items()
+                if st in ("failed", "advisory_failed") and check in _ADVISORY_CHECK_NAMES
+            }
+            # Also capture advisory_failed contract (non-critical misses)
+            if final_checks.get("contract") == "advisory_failed":
+                advisory_failures.add("contract")
             environmental_skips = {
                 check for check, st in final_checks.items() if st == "skipped"
             }
 
             if not test_passed and real_failures:
-                # STRICT: real failures that couldn't be auto-fixed — mark FAILED, no ZIP.
+                # STRICT: real failures that couldn't be auto-fixed.
+                # Mark tests_failed_recoverable (not failed) — the generated files are
+                # intact and the user can iterate via Re-run Tests without regenerating.
                 error_msg = (
-                    f"Generation failed: {', '.join(sorted(real_failures))} did not pass "
-                    "after debug attempts. No ZIP packaged — please review the requirements "
-                    "or click Retry to start a fresh generation."
+                    f"Tests did not pass after debug attempts: "
+                    f"{', '.join(sorted(real_failures))}. "
+                    "Your generated files are preserved — use 'Re-run Tests' to retry "
+                    "after adjusting the scaffold or debugger, or 'Regenerate from Scratch' "
+                    "to start fresh."
                 )
                 log.error(
                     "pipeline.strict_failure",
@@ -649,12 +2347,16 @@ class GenerationOrchestrator:
                     environmental_skips=sorted(environmental_skips),
                 )
                 firestore_service.update_project(uid, project_id, {
-                    "status": ProjectStatus.failed,
-                    "current_stage": "generating",
-                    "error_message": error_msg,
+                    "status": ProjectStatus.tests_failed_recoverable,
+                    "current_stage": "testing",
+                    "last_error": error_msg,
+                    "real_failures": sorted(real_failures),
                     "last_failed_checks": sorted(real_failures),
                     "test_error_log": ("\n".join(test_results.get("errors", []) or []))[:5000],
                 })
+                _write_generation_metrics("strict_failure", real_failures=sorted(real_failures))
+                _save_snapshot(project_id, generated_files, blueprint_dict,
+                               "final", plan.model_dump())
                 return {
                     "status": "error",
                     "zip_url": None,
@@ -680,12 +2382,46 @@ class GenerationOrchestrator:
                     "test_error_log": ("\n".join(test_results.get("errors", [])))[:5000] or None,
                 })
             else:
+                # Persist advisory warning metadata so the UI can surface it.
+                _advisory_logs = test_results.get("logs", {}) or {}
+                _tc_output = _advisory_logs.get("typecheck", "")
+                _tc_errors = _tc_output.count("\n") if _tc_output and _tc_output != "no venv available for mypy" else 0
+                _contract_misses = (test_results.get("logs", {}) or {}).get("contract_advisory", "")
+                _advisory_meta: dict = {}
+                if "typecheck" in advisory_failures:
+                    _advisory_meta["typecheck_warnings"] = _tc_errors
+                    _advisory_meta["typecheck_advisory_output"] = _tc_output[-2000:]
+                if "contract" in advisory_failures:
+                    _advisory_meta["contract_advisory_misses"] = (
+                        _contract_misses.split("; ") if _contract_misses else []
+                    )
                 firestore_service.update_project(uid, project_id, {
                     "generated_files": generated_files,
                     "status": ProjectStatus.tested,
+                    **_advisory_meta,
                 })
 
+            # ── Final STRICT gate — shared with run_test_debug_only via _apply_strict_gate ──
+            _gate_failures = _apply_strict_gate(
+                test_results, generated_files, blueprint_dict,
+                plan.model_dump(), uid, project_id,
+            )
+            if _gate_failures:
+                _write_generation_metrics("strict_failure", real_failures=sorted(_gate_failures))
+                return {
+                    "status": "error",
+                    "zip_url": None,
+                    "generated_files": generated_files,
+                    "errors": [
+                        f"Tests did not pass: {', '.join(sorted(_gate_failures))}. "
+                        "Generated files are preserved — use 'Re-run Tests' to retry."
+                    ],
+                }
+
             # ── STEP 3: Verify (skipped in mock mode, infra warnings, or code failures) ─
+            _verify_strict = (
+                os.environ.get("DEMAESTRO_VERIFY_STRICT", "true").lower() != "false"
+            )
             if not best_effort and not infra_warning and not settings.mock_ai:
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.verifying)
                 firestore_service.update_project(uid, project_id, {"current_stage": "verifying"})
@@ -694,7 +2430,64 @@ class GenerationOrchestrator:
                 log.info("pipeline.verify.done", project_id=project_id, status=verify_result["status"])
 
                 if verify_result["status"] == "fail":
-                    raise RuntimeError(f"Verification failed: {verify_result['issues']}")
+                    # ── Self-heal: try to auto-stub any missing routes before failing. ──
+                    missing_routes = verify_result.get("missing_routes") or []
+                    if missing_routes:
+                        synthetic_log = "\n".join(
+                            f"CONTRACT MISS: {m['method']} {m['path']}   suggestions: (none)"
+                            for m in missing_routes
+                        )
+                        patches = _auto_stub_missing_contract_endpoints(
+                            {"logs": {"contract": synthetic_log}},
+                            generated_files,
+                        )
+                        if patches:
+                            generated_files.update(patches)
+                            log.info(
+                                "verify.self_heal.applied",
+                                project_id=project_id,
+                                patched_files=list(patches.keys()),
+                                endpoints=[
+                                    f"{m['method']} {m['path']}" for m in missing_routes
+                                ],
+                            )
+                            verify_result = self.verifier.verify(generated_files, plan, blueprint)
+                            log.info(
+                                "pipeline.verify.after_self_heal",
+                                project_id=project_id,
+                                status=verify_result["status"],
+                            )
+
+                if verify_result["status"] == "fail":
+                    issues = verify_result.get("issues", [])
+                    log.warning(
+                        "pipeline.verify.failed",
+                        project_id=project_id,
+                        num_issues=len(issues),
+                        issues=issues[:5],
+                    )
+                    if _verify_strict:
+                        # Write to test_results so the STRICT gate catches it.
+                        if test_results is None:
+                            test_results = {}
+                        test_results.setdefault("passed_checks", {})["verify"] = "failed"
+                        test_results.setdefault("logs", {})["verify"] = "; ".join(issues[:10])
+                        test_results.setdefault("errors", []).extend(issues[:5])
+                        # Apply the STRICT gate immediately.
+                        if _apply_strict_gate(
+                            test_results, generated_files,
+                            blueprint.model_dump() if hasattr(blueprint, "model_dump") else {},
+                            plan.model_dump(), uid, project_id,
+                        ):
+                            return {
+                                "status": "error",
+                                "zip_url": None,
+                                "generated_files": generated_files,
+                                "errors": [f"Verify failed: {'; '.join(issues[:3])}"],
+                            }
+                    else:
+                        best_effort = True
+                        warning_msg = f"Verify found {len(issues)} issue(s) — set DEMAESTRO_VERIFY_STRICT=false to bypass."
 
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.verified)
                 firestore_service.update_project(uid, project_id, {"current_stage": "verified"})
@@ -710,7 +2503,17 @@ class GenerationOrchestrator:
             firestore_service.set_project_status(uid, project_id, ProjectStatus.packaging)
             firestore_service.update_project(uid, project_id, {"current_stage": "packaging"})
 
-            deploy_result = self.deployer.deploy(uid, project_id, generated_files, plan)
+            # Inject PAGES.md at project root before zipping
+            pages_md = _build_pages_md(
+                blueprint,
+                sr.app_name or project_id,
+                auth_enabled=(sr.auth_required is not False),
+            )
+            generated_files["PAGES.md"] = pages_md
+
+            deploy_result = self.deployer.deploy(
+                uid, project_id, generated_files, plan, app_name=sr.app_name
+            )
             log.info("pipeline.deploy.done", project_id=project_id, status=deploy_result["status"])
 
             if deploy_result["status"] != "ready":
@@ -726,6 +2529,107 @@ class GenerationOrchestrator:
                 firestore_service.update_project(uid, project_id, {"current_stage": "ready"})
 
             log.info("pipeline.done", project_id=project_id, zip_url=deploy_result["zip_url"])
+
+            # ── Auto-deploy to Vercel (background, non-blocking) ─────────────
+            if vercel_deployer.is_auto_deploy_enabled():
+                firestore_service.update_project(uid, project_id, {
+                    "deployment_status": "deploying",
+                    "deployment_url": None,
+                    "deployment_error": None,
+                })
+
+                def _bg_deploy(
+                    _uid=uid, _project_id=project_id,
+                    _files=dict(generated_files),
+                    _app_name=getattr(sr, "app_name", None) or project_id,
+                ):
+                    try:
+                        result = vercel_deployer.deploy(
+                            project_name=_app_name,
+                            files=_files,
+                            wait_for_ready=True,
+                        )
+                        log.info(
+                            "pipeline.auto_deploy.done",
+                            project_id=_project_id, url=result["url"],
+                        )
+                        try:
+                            firestore_service.update_project(_uid, _project_id, {
+                                "deployment_status": "ready",
+                                "deployment_url": result["url"],
+                                "deployment_project_name": result["project_name"],
+                                "deployment_error": None,
+                            })
+                            log.info(
+                                "pipeline.auto_deploy.firestore_updated",
+                                project_id=_project_id,
+                            )
+                        except Exception as fs_exc:
+                            log.error(
+                                "pipeline.auto_deploy.firestore_update_failed",
+                                project_id=_project_id,
+                                url=result["url"],
+                                error=str(fs_exc),
+                            )
+                        # Post-deploy smoke + self-healing loop.
+                        try:
+                            self._post_deploy_fix_loop(
+                                _project_id, _uid, result, _files,
+                                contract_paths=None,
+                            )
+                        except Exception as _pde:
+                            log.error(
+                                "pipeline.auto_deploy.post_deploy_loop_error",
+                                project_id=_project_id, error=str(_pde),
+                            )
+                    except vercel_deployer.VercelDeployError as e:
+                        log.error(
+                            "pipeline.auto_deploy.failed",
+                            project_id=_project_id, error=str(e),
+                        )
+                        try:
+                            firestore_service.update_project(_uid, _project_id, {
+                                "deployment_status": "failed",
+                                "deployment_error": str(e),
+                            })
+                        except Exception as fs_exc:
+                            log.error(
+                                "pipeline.auto_deploy.firestore_update_failed_after_fail",
+                                project_id=_project_id, error=str(fs_exc),
+                            )
+                    except Exception as e:
+                        log.error(
+                            "pipeline.auto_deploy.exception",
+                            project_id=_project_id, error=str(e),
+                        )
+                        try:
+                            firestore_service.update_project(_uid, _project_id, {
+                                "deployment_status": "failed",
+                                "deployment_error": f"unexpected: {e}",
+                            })
+                        except Exception:
+                            pass
+
+                threading.Thread(target=_bg_deploy, daemon=True).start()
+            else:
+                log.info(
+                    "pipeline.auto_deploy.disabled",
+                    project_id=project_id,
+                    reason="env vars not set or DEMAESTRO_AUTO_DEPLOY=false",
+                )
+            # ─────────────────────────────────────────────────────────────────
+
+            # Write metrics BEFORE returning so the doc is populated, but guard
+            # with an outer try/except: _write_generation_metrics already swallows
+            # internally, but this is an extra defence so no bug in the metrics
+            # path can ever flip a successful pipeline result to an error.
+            _save_snapshot(project_id, generated_files, blueprint_dict,
+                           "final", plan.model_dump())
+            try:
+                _write_generation_metrics("success")
+            except Exception as _m_exc:
+                log.error("metrics.write.success_path_failed",
+                          project_id=project_id, exc=str(_m_exc))
             return {
                 "status": "success",
                 "zip_url": deploy_result["zip_url"],
@@ -739,9 +2643,16 @@ class GenerationOrchestrator:
                 "status": ProjectStatus.failed,
                 "error_message": str(exc),
             })
+            try:
+                _write_generation_metrics("exception", exception=str(exc))
+            except Exception as _m_exc:
+                log.error("metrics.write.exception_path_failed",
+                          project_id=project_id, exc=str(_m_exc))
             return {
                 "status": "error",
                 "zip_url": None,
                 "generated_files": {},
                 "errors": [str(exc)],
             }
+        finally:
+            _mark_inactive(project_id)

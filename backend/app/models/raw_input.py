@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field, model_validator
+import os
 
 
 class RawInputType(str, Enum):
@@ -33,3 +34,29 @@ class RawInputDoc(BaseModel):
         if self.type == RawInputType.pdf and self.storage_ref is None:
             raise ValueError("storage_ref is required for type=pdf")
         return self
+
+
+class RawInputOut(BaseModel):
+    """API response shape for a single raw input."""
+    id: str
+    type: str
+    filename: Optional[str] = None
+    content: Optional[str] = None
+    extracted_text: Optional[str] = None
+    char_count: int
+    created_at: datetime
+
+    @classmethod
+    def from_doc(cls, doc: "RawInputDoc") -> "RawInputOut":
+        filename = None
+        if doc.storage_ref:
+            filename = os.path.basename(doc.storage_ref)
+        return cls(
+            id=doc.id,
+            type=doc.type.value,
+            filename=filename,
+            content=doc.content,
+            extracted_text=doc.extracted_text,
+            char_count=doc.char_count,
+            created_at=doc.timestamp,
+        )

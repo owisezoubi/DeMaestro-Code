@@ -1,0 +1,102 @@
+{
+  "_comment": "Sample benchmark blueprint for model comparison runs. Based on a plant-tracker todo app with auth, categories, and favorites. Exercises: SQLAlchemy Mapped[], multiple route files (duplicate operation ID risk), forwardRef UI components, auth flow (AUTH-SHAPE risk), and favorites endpoints.",
+  "test_uid": "compare_models_test_user",
+  "structured_requirements": {
+    "version": 1,
+    "app_name": "PlantTracker",
+    "summary": "A personal plant care tracking app where users can catalog their houseplants, set watering reminders, track care history, and mark favorite plants for quick access.",
+    "user_requirements": [
+      {
+        "id": "R001",
+        "statement": "Users can register and log in with email and password",
+        "rationale": "Authentication is required to keep plant collections private per user",
+        "priority": "must_have"
+      },
+      {
+        "id": "R002",
+        "statement": "Users can add plants with a name, species, category, and care notes",
+        "rationale": "Core functionality: catalog their plants",
+        "priority": "must_have"
+      },
+      {
+        "id": "R003",
+        "statement": "Users can mark plants as favorites and view their favorites list",
+        "rationale": "Quick access to most-loved plants",
+        "priority": "must_have"
+      },
+      {
+        "id": "R004",
+        "statement": "Users can log watering events for each plant",
+        "rationale": "Track care history",
+        "priority": "must_have"
+      },
+      {
+        "id": "R005",
+        "statement": "Users can view a dashboard showing plants that need watering soon",
+        "rationale": "Proactive reminders",
+        "priority": "should_have"
+      },
+      {
+        "id": "R006",
+        "statement": "Plants can be organized into categories (Indoor, Outdoor, Succulent, etc.)",
+        "rationale": "Grouping for easier navigation",
+        "priority": "should_have"
+      }
+    ],
+    "tech_stack": "python-postgres",
+    "auth_required": true,
+    "database_entities": ["User", "Plant", "WateringLog", "Category"],
+    "key_features": ["authentication", "CRUD plants", "favorites", "watering log", "dashboard"]
+  },
+  "blueprint_response": {
+    "app_name": "PlantTracker",
+    "description": "Personal plant care tracker with auth, categorized plant catalog, favorites, and watering history",
+    "technology_stack": "python-postgres",
+    "frontend": {
+      "pages": ["LoginPage", "RegisterPage", "Dashboard", "PlantList", "PlantDetail", "FavoritesPage", "AddPlantPage"],
+      "required_ui_components": ["Button", "Input", "Label", "Card", "CardHeader", "CardContent", "CardTitle", "Badge", "Textarea"],
+      "state_management": "react-query",
+      "routing": "react-router-dom"
+    },
+    "backend": {
+      "framework": "fastapi",
+      "routers": ["auth", "plants", "categories", "watering"],
+      "models": ["User", "Plant", "WateringLog", "Category"],
+      "auth_strategy": "JWT",
+      "database": "postgresql"
+    },
+    "data_model": {
+      "User": {
+        "fields": ["id", "email", "password_hash", "name", "created_at"],
+        "relationships": ["plants (one-to-many)"]
+      },
+      "Plant": {
+        "fields": ["id", "user_id", "name", "species", "category_id", "care_notes", "watering_interval_days", "last_watered", "is_favorite", "created_at"],
+        "relationships": ["user (many-to-one)", "category (many-to-one)", "watering_logs (one-to-many)"]
+      },
+      "WateringLog": {
+        "fields": ["id", "plant_id", "watered_at", "notes"],
+        "relationships": ["plant (many-to-one)"]
+      },
+      "Category": {
+        "fields": ["id", "name"],
+        "relationships": ["plants (one-to-many)"]
+      }
+    },
+    "api_endpoints": [
+      "POST /api/auth/register",
+      "POST /api/auth/login",
+      "GET /api/auth/me",
+      "GET /api/plants",
+      "POST /api/plants",
+      "GET /api/plants/{id}",
+      "PUT /api/plants/{id}",
+      "DELETE /api/plants/{id}",
+      "POST /api/plants/{id}/favorite",
+      "GET /api/plants/favorites",
+      "GET /api/categories",
+      "POST /api/watering/{plant_id}",
+      "GET /api/watering/{plant_id}"
+    ]
+  }
+}

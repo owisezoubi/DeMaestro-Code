@@ -7,14 +7,15 @@ import structlog
 from anthropic import Anthropic
 
 from app.ai.gemini.agents.blueprint import BlueprintResponse
-from app.config import settings
+from app.config import settings, get_agent_model
 from app.models.generation_plan import GenerationPlan
 
 
 class ModifierAgent:
     def __init__(self) -> None:
-        self.model = settings.claude_model
+        self.model = get_agent_model("modifier")
         self.log = structlog.get_logger("ModifierAgent")
+        self.token_counter: dict[str, int] = {"input": 0, "output": 0, "calls": 0}
 
     def modify(
         self,
@@ -93,6 +94,10 @@ Output ONLY valid JSON in this exact shape (no markdown, no commentary):
                 max_tokens=16000,
                 messages=[{"role": "user", "content": prompt}],
             )
+            if hasattr(response, "usage"):
+                self.token_counter["input"] += response.usage.input_tokens
+                self.token_counter["output"] += response.usage.output_tokens
+            self.token_counter["calls"] += 1
             raw = response.content[0].text.strip()
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw.strip())

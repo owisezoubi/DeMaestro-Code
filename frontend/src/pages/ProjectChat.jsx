@@ -2,10 +2,8 @@ import { useState, useEffect } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { ArrowLeft, Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Loader2, CheckCircle2, AlertCircle } from 'lucide-react'
 
-import Logo from '../components/Logo'
-import ThemeToggle from '../components/ThemeToggle'
 import { getProjectStatus } from '../api/requirements'
 import { triggerStructuring, getClarifications, answerClarificationsBatch, getClarificationProgress, saveClarificationProgress } from '../api/structure'
 import { getProject } from '../api/projects'
@@ -69,18 +67,7 @@ export default function ProjectChat() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
-      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
-          <Logo />
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            <Link to="/dashboard" className="btn-secondary text-sm">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to dashboard
-            </Link>
-          </div>
-        </div>
-      </header>
+
 
       {status && (
         <div className="max-w-2xl mx-auto px-4 pt-4">
@@ -205,17 +192,29 @@ function FailedCard({ projectId, qc }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['project-status', projectId] })
       qc.invalidateQueries({ queryKey: ['project', projectId] })
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      qc.invalidateQueries({ queryKey: ['generationStatus', projectId] })
       toast.success(
         isGenFailure
-          ? 'Retrying code generation — your requirements are saved'
+          ? 'Retrying code generation — starting fresh from cycle 1'
           : 'Re-analyzing your requirements…',
       )
       if (isGenFailure) {
         navigate(`/projects/${projectId}/generation`)
       }
     },
-    onError: (err) =>
-      toast.error(err.friendlyMessage || 'Retry failed. Please try again.'),
+    onError: (err) => {
+      if (err.response?.status === 409) {
+        const detail = err.response?.data?.detail || ''
+        if (detail.includes('in progress')) {
+          toast.error('Generation is already running for this project.')
+        } else {
+          toast.error("This project isn't in a state where generation can start.")
+        }
+      } else {
+        toast.error(err.friendlyMessage || 'Retry failed. Please try again.')
+      }
+    },
   })
 
   const title = isGenFailure ? 'Code generation failed' : 'Something went wrong'
@@ -223,8 +222,8 @@ function FailedCard({ projectId, qc }) {
   const totalCount = project?.total_files || 0
   const description = isGenFailure
     ? (partialCount > 0
-        ? `${partialCount}${totalCount ? ' of ' + totalCount : ''} files were already generated and saved. Retry will continue from where it left off — no work will be re-done.`
-        : "Your approved requirements and blueprint are saved. Retry will start code generation.")
+        ? `Generation failed after ${partialCount}${totalCount ? ' of ' + totalCount : ''} files. Retry starts fresh from cycle 1 — your requirements and blueprint are saved.`
+        : "Your approved requirements and blueprint are saved. Retry will start code generation from cycle 1.")
     : "We couldn't analyze your requirements. Retry will run the analysis again."
   const buttonText = isGenFailure ? 'Retry code generation' : 'Retry analysis'
 

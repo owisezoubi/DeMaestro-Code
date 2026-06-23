@@ -1,9 +1,11 @@
+import * as React from "react"
 import { cn } from "@/lib/utils"
 
-export function ScrollArea({ className, children, ...props }) {
-  return (
-    <div className={cn("relative overflow-auto", className)} {...props}>
-      {children}
-    </div>
-  )
-}
+const ScrollArea = React.forwardRef(({ className, children, ...props }, ref) => (
+  <div ref={ref} className={cn("relative overflow-auto", className)} {...props}>
+    {children}
+  </div>
+))
+ScrollArea.displayName = "ScrollArea"
+
+export { ScrollArea }

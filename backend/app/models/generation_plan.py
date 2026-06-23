@@ -42,6 +42,9 @@ class GenerationPlan(BaseModel):
     notes: str
     extra_dependencies: list[str] = []
     extra_frontend_dependencies: list[str] = []
+    # Populated by architect when the app is a single-page site (portfolio, profile, etc.).
+    # Each entry: {"path": "/api/<slug>/data", "returns": ["entity1", ...], "public": true}
+    aggregate_endpoints: list[dict] = []
 
     @field_validator("technology_stack", "notes", mode="before")
     @classmethod

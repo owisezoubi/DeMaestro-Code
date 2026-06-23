@@ -36,25 +36,34 @@ class VerifierAgent:
         issues: list[str] = []
 
         try:
-            issues.extend(self._verify_routes_exist(generated_files, blueprint))
+            route_issues, missing_routes = self._verify_routes_exist(generated_files, blueprint)
+            issues.extend(route_issues)
             issues.extend(self._verify_imports(generated_files, plan.technology_stack))
             issues.extend(self._verify_db_schema(generated_files, blueprint))
 
             status = "pass" if not issues else "fail"
             self.log.info("verify.done", status=status, num_issues=len(issues))
-            return {"status": status, "issues": issues}
+            return {
+                "status": status,
+                "issues": issues,
+                "missing_routes": missing_routes,
+            }
 
         except Exception as exc:
             self.log.error("verify.error", error=str(exc))
-            return {"status": "error", "issues": [str(exc)]}
+            return {"status": "error", "issues": [str(exc)], "missing_routes": []}
 
     # ── individual checks ─────────────────────────────────────────────────────
 
     def _verify_routes_exist(
         self, files: dict[str, str], blueprint: BlueprintResponse
-    ) -> list[str]:
-        """Check every blueprint API route has a matching decorator or path string."""
-        issues = []
+    ) -> tuple[list[str], list[dict]]:
+        """Check every blueprint API route has a matching decorator or path string.
+
+        Returns (issues_strings, missing_routes_structured).
+        """
+        issues: list[str] = []
+        missing_routes: list[dict] = []
         all_content = "\n".join(files.values())
 
         for route in blueprint.api_routes:
@@ -67,8 +76,9 @@ class VerifierAgent:
                 and f"'{path}'" not in all_content
             ):
                 issues.append(f"Route {route.method.upper()} {path} not found in generated code")
+                missing_routes.append({"method": route.method.upper(), "path": path})
 
-        return issues
+        return issues, missing_routes
 
     def _verify_imports(
         self, files: dict[str, str], stack: str

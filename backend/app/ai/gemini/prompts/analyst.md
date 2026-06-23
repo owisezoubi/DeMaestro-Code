@@ -158,7 +158,7 @@ Set `requirement_id` to the UR-XX id if the ambiguity is directly tied to a spec
 
 **DO ask about:**
 - Missing or conflicting user roles when the distinction meaningfully changes routes or permissions
-- Authentication method when auth is implied but unspecified
+- Whether users need accounts at all, when auth is implied but unspecified. Use ONLY these two options: "Yes, add email and password sign-up and login" / "No, no accounts needed — the app is public". NEVER ask which auth method, since only email + password is supported.
 - Visual style and design preferences when the user has not mentioned them
 - Undefined attributes on a named entity when the missing information would meaningfully change the skeleton
 - A mentioned-but-undefined integration (e.g., "send emails" with no provider named)
@@ -169,6 +169,7 @@ Set `requirement_id` to the UR-XX id if the ambiguity is directly tied to a spec
 - Performance, caching, or scalability
 - Security hardening beyond basic auth
 - Features the user never mentioned
+- Which authentication provider to use (Google, GitHub, magic link, etc.) — email + password is the only option
 
 # Style & Design Check
 
@@ -192,9 +193,9 @@ If the user already described a style (e.g., "sleek and dark", "bright and fun")
 ```json
 {
   "id": "AMB-01",
-  "field_path": "auth.method",
-  "reason": "I'd like to understand how you want users to sign in. Which of these feels right for your project?",
-  "suggested_options": ["email/password", "Google OAuth", "GitHub OAuth", "magic link"],
+  "field_path": "auth_required",
+  "reason": "It looks like users may need to sign in. Would you like people to create an account with email and password, or is this app open to everyone without logging in?",
+  "suggested_options": ["Yes, add email and password sign-up and login", "No, no accounts needed — the app is public"],
   "requirement_id": null
 }
 ```
@@ -209,7 +210,7 @@ If the user already described a style (e.g., "sleek and dark", "bright and fun")
   "requirement_id": null
 }
 ```
-*Why it's bad: "The user did not specify…" is an observation, not a question. It also uses forbidden technical terms (schema, endpoints, implementation). Rephrase as a direct, friendly question.*
+*Why it's bad: "The user did not specify…" is an observation, not a question. It also uses forbidden technical terms (schema, endpoints, implementation). It also offers auth methods beyond email+password, which are not supported. Rephrase as a direct, friendly question with only the two valid options.*
 
 # Field-by-Field Guidelines
 
@@ -257,7 +258,55 @@ See Ambiguity Rules above. Maximum 3. All must have `suggested_options`.
 1. Output ONLY the JSON object. No text before or after it.
 2. At least one entity and one user_requirement are required.
 3. All UR-XX ids must be unique. All AMB-XX ids must be unique.
-4. If `auth_required` is null, include a corresponding AMB-XX for it (counts toward the 3-ambiguity cap).
+4. If `auth_required` is null (unknown), include a corresponding AMB-XX for it (counts toward the 3-ambiguity cap). If `auth_required` is explicitly `false` (user opted out), do NOT add an AMB-XX — the user was clear.
 5. `version` is always 1 in this initial structuring pass.
 6. Maximum 3 entries in the `ambiguities` array.
 7. Always set `set_level_validation` to all `not_evaluated`.
+
+# AUTHENTICATION POLICY (HARD CONSTRAINT)
+
+The ONLY supported authentication method is **email + password**.
+
+When the user's input mentions any of:
+- "Google sign-in", "log in with Google", "sign in with Google"
+- "Facebook / GitHub / Apple / Microsoft login"
+- "social login", "social auth", "OAuth", "OpenID"
+- "magic link", "passwordless"
+- "MFA", "two-factor", "2FA", "TOTP", "SMS code"
+- "phone OTP", "SMS verification"
+- "biometric", "fingerprint", "Face ID"
+
+YOU MUST:
+1. **Silently downgrade** to email + password in the structured requirements.
+2. Add a note in the `summary` or as a `validation.notes` entry on the auth-related requirement: "Alternative auth methods (X) not supported in this version. Defaulted to email + password."
+3. **Do NOT raise an AmbiguityFlag** about which auth method to use.
+4. **Do NOT ask the user** to clarify the auth method.
+5. **Do NOT include** alternative auth as a user_requirement.
+
+Email + password authentication includes:
+- Register with email, password, optional name
+- Log in with email, password
+- Logout
+- Persistent session via JWT
+- Optional "forgot password" flow (advisory, may be deferred)
+
+Anything else is out of scope for this platform.
+
+# NO-AUTH DETECTION
+
+Recognize these phrases as an **explicit opt-out of authentication**:
+- "no login needed", "no login required", "no auth", "no authentication"
+- "no accounts", "no user accounts", "no sign-up", "no sign in"
+- "anyone can use it", "anyone can view", "open to the public"
+- "public site", "public page", "fully public", "public-facing"
+- "static content", "purely static", "read-only public"
+- "no user management", "no permissions"
+
+When ANY of these phrases appear, you MUST:
+1. Set `auth_required` to **`false`** in the output.
+2. Do NOT include login, register, or account-management in `user_requirements`.
+3. Do NOT raise an `AmbiguityFlag` about authentication.
+4. Add to the `summary`: " Authentication is not required — the app is fully public."
+5. Do NOT ask the user to clarify. They were explicit.
+
+**Default behavior** — when the user has mentioned neither "yes auth needed" nor "no auth needed": do NOT pre-decide. Leave `auth_required: null` so the Completeness agent can ask.

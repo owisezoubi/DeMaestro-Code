@@ -8,6 +8,7 @@ from fastapi import APIRouter, Body, HTTPException, status
 
 from app.auth.dependencies import CurrentUser
 from app.models.project import ProjectCreate, ProjectMeta, ProjectStatus
+from app.models.raw_input import RawInputOut
 from app.services import firestore_service as fs
 
 log = structlog.get_logger(__name__)
@@ -125,6 +126,46 @@ def _regenerate_with_changes(uid: str, project_id: str, change_request: str) -> 
         })
 
 
+# Statuses where the backend is actively running LLM-heavy work.
+# Note: there is no separate "debugging" status — debug cycles run
+# under ProjectStatus.testing (the orchestrator sets it each cycle).
+_ACTIVE_STATUSES = {
+    ProjectStatus.generating,
+    ProjectStatus.testing,
+    ProjectStatus.deploying,
+    ProjectStatus.blueprinting,
+    ProjectStatus.packaging,
+    ProjectStatus.modifying,
+    ProjectStatus.regenerating,
+    ProjectStatus.verifying,
+}
+
+
+@router.get("/active")
+async def get_active_project(user: CurrentUser) -> dict:
+    """Return the user's currently running project (if any), else null.
+
+    Polled by the frontend's global ActiveGenerationBanner every 3 s.
+    Returns a lightweight dict rather than the full ProjectMeta to keep
+    responses small.
+    """
+    active = fs.list_projects_in_statuses(user.uid, _ACTIVE_STATUSES)
+    if not active:
+        return {"project": None}
+    p = active[0]
+    return {
+        "project": {
+            "id": p.id,
+            "name": p.name,
+            "status": p.status.value,
+            "current_stage": p.current_stage,
+            "current_file": p.current_file,
+            "generated_count": p.generated_count or 0,
+            "total_files": p.total_files,
+        },
+    }
+
+
 @router.get("", response_model=list[ProjectMeta])
 async def list_projects(user: CurrentUser):
     """List all projects belonging to the current user."""
@@ -153,6 +194,16 @@ async def get_project(project_id: str, user: CurrentUser):
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+@router.get("/{project_id}/raw-inputs", response_model=list[RawInputOut])
+async def get_project_raw_inputs(project_id: str, user: CurrentUser):
+    """Return all raw requirement inputs for a project."""
+    project = fs.get_project(user.uid, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    docs = fs.list_raw_inputs(user.uid, project_id)
+    return [RawInputOut.from_doc(doc) for doc in docs]
 
 
 @router.delete("/{project_id}")
@@ -196,3 +247,103 @@ async def request_changes(
     ).start()
 
     return {"message": "Changes requested. Regenerating...", "project_id": project_id}
+
+
+@router.get("/{project_id}/deployment-status")
+async def deployment_status(project_id: str, user: CurrentUser):
+    """Return current Vercel deployment status for this project."""
+    project = fs.get_project(user.uid, project_id)
+    log.info(
+        "deployment_status.endpoint.called",
+        project_id=project_id, uid=user.uid,
+        found=bool(project),
+        status=project.deployment_status if project else None,
+    )
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {
+        "status": project.deployment_status or None,
+        "url": project.deployment_url or None,
+        "error": project.deployment_error or None,
+        "project_name": project.deployment_project_name or None,
+    }
+
+
+@router.post("/{project_id}/deploy")
+async def deploy_project(project_id: str, user: CurrentUser):
+    """Manually trigger a Vercel deployment for this project."""
+    from app.services import vercel_deployer
+
+    log.info("deploy.endpoint.called", project_id=project_id, uid=user.uid)
+
+    if not vercel_deployer.is_configured():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Vercel deployment not configured. Set "
+                "DEMAESTRO_VERCEL_TOKEN and DEMAESTRO_POSTGRES_URL "
+                "in backend/.env, then restart the DeMaestro backend. "
+                "Check the backend logs for vercel_deployer."
+                "not_configured events for which var is missing."
+            ),
+        )
+    project = fs.get_project(user.uid, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    files = project.generated_files or {}
+    if not files:
+        raise HTTPException(status_code=400, detail="Project has no generated files")
+
+    fs.update_project(user.uid, project_id, {
+        "deployment_status": "deploying",
+        "deployment_url": None,
+        "deployment_error": None,
+    })
+
+    app_name = project_id
+
+    def _bg(_uid=user.uid, _pid=project_id, _files=dict(files), _name=app_name):
+        try:
+            result = vercel_deployer.deploy(
+                project_name=_name,
+                files=_files,
+                wait_for_ready=True,
+            )
+            log.info("deploy.bg.success", project_id=_pid, url=result["url"])
+            try:
+                fs.update_project(_uid, _pid, {
+                    "deployment_status": "ready",
+                    "deployment_url": result["url"],
+                    "deployment_project_name": result["project_name"],
+                    "deployment_error": None,
+                })
+                log.info("deploy.bg.firestore_updated", project_id=_pid)
+            except Exception as fs_exc:
+                log.error(
+                    "deploy.bg.firestore_update_failed",
+                    project_id=_pid, url=result["url"], error=str(fs_exc),
+                )
+        except vercel_deployer.VercelDeployError as e:
+            log.error("deploy.bg.vercel_failed", project_id=_pid, error=str(e))
+            try:
+                fs.update_project(_uid, _pid, {
+                    "deployment_status": "failed",
+                    "deployment_error": str(e),
+                })
+            except Exception as fs_exc:
+                log.error(
+                    "deploy.bg.firestore_update_failed_after_vercel_fail",
+                    project_id=_pid, error=str(fs_exc),
+                )
+        except Exception as e:
+            log.error("deploy.bg.unexpected", project_id=_pid, error=str(e))
+            try:
+                fs.update_project(_uid, _pid, {
+                    "deployment_status": "failed",
+                    "deployment_error": f"unexpected: {e}",
+                })
+            except Exception:
+                pass
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"status": "deploying"}

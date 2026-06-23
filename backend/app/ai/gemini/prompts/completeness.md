@@ -48,18 +48,34 @@ Return strict JSON matching this schema:
   "missing_aspects": [
     {
       "aspect": "user authentication",
-      "description": "Would you like people to sign in, so each person's data stays private to them?",
+      "description": "It looks like users will sign in. Should they create an account with email and password?",
       "suggested_category": "security",
       "examples": [
-        "Email and password login",
-        "Login with Google",
-        "No login needed — anyone can use it",
-        "Invite-only access"
+        "Yes, add email and password sign-up and login",
+        "No, no accounts needed — the app is public"
       ]
     }
   ],
   "is_complete": false
 }
 ```
+
+# Authentication Completeness Rules
+
+Authentication is **CONSIDERED COMPLETE** if the requirements include any form of login. The default is email + password — no other methods are supported.
+
+- Do NOT flag "missing social login" or "missing OAuth" as a gap.
+- Do NOT suggest adding Google / Facebook / GitHub sign-in.
+- Do NOT suggest MFA, magic links, or alternative methods.
+- NEVER include "Login with Google", "Login with GitHub", or similar as an example option.
+- Do NOT flag missing auth if `auth_required` is already `false` — the user explicitly opted out.
+
+If the app appears to need users but `auth_required` is null (unknown), flag this as a gap with:
+- `description`: "It looks like users will sign in. Should they create an account with email and password?"
+- `examples`: exactly two options:
+  - "Yes, add email and password sign-up and login"  → sets `auth_required: true`
+  - "No, no accounts needed — the app is public"    → sets `auth_required: false`
+
+Never suggest a third option. The user's answer maps directly to `auth_required: true` or `auth_required: false`.
 
 Write `examples` as plain English options the user can choose from. Keep them concrete and simple — no jargon.

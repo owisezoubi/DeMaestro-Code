@@ -89,24 +89,48 @@ def _make_plan() -> GenerationPlan:
 
 # ── ArchitectAgent ────────────────────────────────────────────────────────────
 
+def test_architect_prompt_renders_without_format_error():
+    """The architect prompt must not raise ValueError from unescaped braces in f-strings."""
+    agent = ArchitectAgent()
+    context = {
+        "structured_requirements": _make_sr().model_dump(),
+        "blueprint": _make_blueprint().model_dump(),
+    }
+    try:
+        prompt = agent._build_architect_prompt(context)
+    except ValueError as exc:
+        if "Invalid format specifier" in str(exc):
+            raise AssertionError(
+                "f-string brace bug: JSON examples inside _build_architect_prompt "
+                "are being parsed as Python format specifiers. "
+                "Convert the static JSON block to a plain (non-f) string."
+            ) from exc
+        raise
+    assert "CHECKLIST OUTPUT REQUIREMENT" in prompt, \
+        "Checklist block is missing from the architect prompt"
+    assert "model.User" in prompt, "JSON example for model item is missing"
+    assert "route.POST.api.orders" in prompt, "JSON example for route item is missing"
+
+
 def test_architect_outputs_valid_generation_plan(monkeypatch):
     """ArchitectAgent produces a valid GenerationPlan in mock mode."""
     from app.config import settings as app_settings
     monkeypatch.setattr(app_settings, "mock_ai", True)
 
-    plan = ArchitectAgent().architect(_make_sr(), _make_blueprint())
+    plan, checklist = ArchitectAgent().architect(_make_sr(), _make_blueprint())
 
     assert isinstance(plan, GenerationPlan)
     assert plan.technology_stack == "python-postgres"
     assert len(plan.files) > 0
     assert len(plan.generation_order) == len(plan.files)
+    assert isinstance(checklist, list)
 
 
 def test_architect_generation_order_matches_files(monkeypatch):
     from app.config import settings as app_settings
     monkeypatch.setattr(app_settings, "mock_ai", True)
 
-    plan = ArchitectAgent().architect(_make_sr(), _make_blueprint())
+    plan, _ = ArchitectAgent().architect(_make_sr(), _make_blueprint())
     file_paths = {f.path for f in plan.files}
     for path in plan.generation_order:
         assert path in file_paths
@@ -116,7 +140,7 @@ def test_architect_includes_backend_and_frontend_files(monkeypatch):
     from app.config import settings as app_settings
     monkeypatch.setattr(app_settings, "mock_ai", True)
 
-    plan = ArchitectAgent().architect(_make_sr(), _make_blueprint())
+    plan, _ = ArchitectAgent().architect(_make_sr(), _make_blueprint())
     paths = [f.path for f in plan.files]
     assert any("backend" in p or ".py" in p for p in paths)
     assert any("frontend" in p or ".jsx" in p or ".tsx" in p for p in paths)
@@ -521,7 +545,7 @@ def test_orchestrator_full_pipeline_architect_to_deploy(monkeypatch):
         # Stub architect and generator so we control the files
         patch(
             "app.ai.claude.agents.architect.ArchitectAgent.architect",
-            return_value=_make_plan(),
+            return_value=(_make_plan(), []),
         ),
         patch(
             "app.ai.claude.agents.generator.GeneratorAgent.generate_file",
@@ -590,7 +614,7 @@ def test_orchestrator_full_pipeline_debug_loop_fires_on_test_failure(monkeypatch
         patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
         patch("app.services.firestore_service.update_project"),
         patch("app.services.firestore_service.set_project_status"),
-        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=_make_plan()),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=(_make_plan(), [])),
         patch(
             "app.ai.claude.agents.generator.GeneratorAgent.generate_file",
             side_effect=lambda ftg, *a, **kw: generated_files_result.get(ftg.path, "# mock\n"),
@@ -681,7 +705,7 @@ def test_full_pipeline_architect_to_deploy(monkeypatch):
         patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
         patch("app.services.firestore_service.update_project"),
         patch("app.services.firestore_service.set_project_status"),
-        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=plan),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=(plan, [])),
         patch(
             "app.ai.claude.agents.generator.GeneratorAgent.generate_file",
             side_effect=lambda ftg, *a, **kw: generated_files_result.get(ftg.path, "# mock\n"),

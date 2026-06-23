@@ -1,13 +1,11 @@
 import { useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { useDropzone } from 'react-dropzone'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { ArrowLeft, FileText, Upload, X } from 'lucide-react'
+import { FileText, Upload, X } from 'lucide-react'
 
-import Logo from '../components/Logo'
-import ThemeToggle from '../components/ThemeToggle'
 import { createProject } from '../api/projects'
 import { submitTextRequirements, submitPdfRequirements } from '../api/requirements'
 import { triggerStructuring } from '../api/structure'
@@ -108,19 +106,7 @@ export default function NewProject() {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
-      {/* Header */}
-      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
-          <Logo />
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            <Link to="/dashboard" className="btn-secondary text-sm">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to dashboard
-            </Link>
-          </div>
-        </div>
-      </header>
+
 
       {/* Main */}
       <main className="max-w-2xl mx-auto px-4 py-10">

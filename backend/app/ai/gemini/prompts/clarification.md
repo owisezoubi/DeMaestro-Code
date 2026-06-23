@@ -126,17 +126,29 @@ Current document has:
 ```json
 {
   "id": "AMB-01",
-  "field_path": "auth.method",
-  "reason": "I'd like to understand how you want users to sign in. Which of these feels right for your project?",
-  "suggested_options": ["email/password", "Google OAuth"],
+  "field_path": "auth_required",
+  "reason": "It looks like users may need to sign in. Would you like people to create an account with email and password, or is this app open to everyone without logging in?",
+  "suggested_options": ["Yes, add email and password sign-up and login", "No, no accounts needed — the app is public"],
   "requirement_id": null
 }
 ```
 
-Answer: `{ "question_id": "AMB-01", "answer": "Google OAuth" }`
+Answer: `{ "question_id": "AMB-01", "answer": "Yes, add email and password sign-up and login" }`
 
 Actions:
 - Set `auth_required` to `true`
 - Remove AMB-01 from `ambiguities`
-- Add any OAuth-specific entities (e.g., OAuthToken) if not already present
-- If the OAuth provider scope or permissions are still unclear, create a new AMB-XX flag phrased as a friendly question (e.g., "I want to make sure Google sign-in will work just the way you expect. Should users be able to connect any Google account, or only accounts from a specific organisation?")
+- Add login and register requirements if not already present
+
+# OUT-OF-SCOPE CLARIFICATIONS
+
+You MUST NEVER raise a clarification question about:
+- Which authentication providers to use
+- Whether to include Google / social / OAuth login
+- Whether to require MFA / 2FA
+- Magic link vs password choice
+- Phone verification or SMS OTP
+
+Email + password is the ONLY supported authentication method. There is nothing to clarify about it.
+
+If the user's input or a previous answer asked for an alternative auth method, treat it as email + password and do NOT re-raise the question. Apply the same silent downgrade rule: set `auth_required: true`, add email+password login/register requirements, and move on.

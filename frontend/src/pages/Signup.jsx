@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { toast } from 'sonner'
+import { AlertCircle } from 'lucide-react'
 
 import { useAuth } from '../context/AuthContext'
 import Logo from '../components/Logo'
 import ThemeToggle from '../components/ThemeToggle'
+import AuthScene from '../components/AuthScene'
 
 export default function Signup() {
   const { signup } = useAuth()
@@ -12,42 +13,43 @@ export default function Signup() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
 
   async function onSubmit(e) {
     e.preventDefault()
+    setError(null)
     if (password.length < 6) {
-      toast.error('Password must be at least 6 characters')
+      setError('Password must be at least 6 characters')
       return
     }
     setBusy(true)
     try {
       await signup(email, password)
-      toast.success('Account created')
       navigate('/welcome', { replace: true })
     } catch (err) {
-      toast.error(err.message || 'Signup failed')
+      setError(err.message || 'Signup failed')
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center px-4 bg-slate-50 dark:bg-slate-900">
-      <ThemeToggle className="absolute top-4 right-4" />
-      <div className="w-full max-w-sm">
-        <div className="flex justify-center mb-8">
-          <Logo linked={false} imgClassName="h-24 w-auto" />
+    <div className="min-h-screen flex">
+      {/* Left: form */}
+      <div className="flex-1 flex flex-col items-center justify-center px-8 py-12 bg-surface-page relative">
+        <div className="absolute top-4 right-4">
+          <ThemeToggle />
         </div>
-        <div className="card">
-          <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100 mb-1">
-            Create your account
-          </h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-            Get started by creating a free account.
-          </p>
-          <form onSubmit={onSubmit} className="space-y-4">
+        <div className="w-full max-w-md space-y-8">
+          <div>
+            <Logo linked={false} className="mb-8" />
+            <h1 className="text-3xl font-bold text-text-default">Create your account</h1>
+            <p className="text-text-muted mt-2">Get started — it's free.</p>
+          </div>
+
+          <form onSubmit={onSubmit} className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+              <label className="block text-sm font-medium text-text-default mb-1.5">
                 Email
               </label>
               <input
@@ -55,12 +57,16 @@ export default function Signup() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="input"
+                className="w-full px-4 py-3 rounded-lg border border-surface-border
+                           bg-surface-panel text-text-default
+                           placeholder:text-text-muted
+                           focus:outline-none focus:ring-2 focus:ring-accent/50
+                           focus:border-accent transition-all"
                 placeholder="you@example.com"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+              <label className="block text-sm font-medium text-text-default mb-1.5">
                 Password
               </label>
               <input
@@ -69,22 +75,53 @@ export default function Signup() {
                 minLength={6}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="input"
+                className="w-full px-4 py-3 rounded-lg border border-surface-border
+                           bg-surface-panel text-text-default
+                           placeholder:text-text-muted
+                           focus:outline-none focus:ring-2 focus:ring-accent/50
+                           focus:border-accent transition-all"
                 placeholder="At least 6 characters"
               />
             </div>
-            <button type="submit" disabled={busy} className="btn-primary w-full">
+
+            {error && (
+              <div
+                role="alert"
+                className="flex items-start gap-2 px-4 py-3 rounded-lg
+                           bg-error/10 border border-error/20 text-error
+                           text-sm animate-shake"
+              >
+                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={busy}
+              className="w-full py-3 rounded-lg
+                         bg-gradient-to-r from-accent to-accent-secondary
+                         text-white font-semibold
+                         hover:shadow-lg hover:shadow-accent/30
+                         hover:scale-[1.02] active:scale-[0.98]
+                         disabled:opacity-60 disabled:scale-100
+                         transition-all duration-200"
+            >
               {busy ? 'Creating…' : 'Create account'}
             </button>
           </form>
-          <p className="text-sm text-slate-600 dark:text-slate-400 mt-6 text-center">
+
+          <p className="text-sm text-text-muted text-center">
             Already have an account?{' '}
-            <Link to="/login" className="text-primary-600 hover:underline">
+            <Link to="/login" className="text-accent font-medium hover:underline">
               Sign in
             </Link>
           </p>
         </div>
       </div>
+
+      {/* Right: animated scene */}
+      <AuthScene />
     </div>
   )
 }

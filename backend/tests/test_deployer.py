@@ -50,8 +50,8 @@ def test_deployer_packages_zip_and_returns_signed_url(monkeypatch):
     assert result["zip_url"] == fake_signed_url
 
     mock_zip.assert_called_once()
-    mock_upload.assert_called_once_with("uid1", "proj-xyz", mock_zip.return_value)
-    mock_sign.assert_called_once_with("users/uid1/projects/proj-xyz/exports/proj-xyz.zip", expires_in_days=7)
+    mock_upload.assert_called_once_with("uid1", "proj-xyz", mock_zip.return_value, zip_filename="proj-xyz.zip")
+    mock_sign.assert_called_once_with("users/uid1/projects/proj-xyz/exports/proj-xyz.zip", expires_in_days=7, download_filename="proj-xyz.zip")
 
     update_kwargs = mock_update.call_args.args[2]
     assert update_kwargs["zip_url"] == fake_signed_url
@@ -127,7 +127,7 @@ def test_orchestrator_packages_zip_even_when_tests_fail(monkeypatch):
         patch("app.services.firestore_service.get_latest_structured_requirements", return_value=sr),
         patch("app.services.firestore_service.update_project", side_effect=lambda u, p, d: updates.append(d)),
         patch("app.services.firestore_service.set_project_status"),
-        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=plan),
+        patch("app.ai.claude.agents.architect.ArchitectAgent.architect", return_value=(plan, [])),
         patch("app.services.template_service.load_stack_templates", return_value={}),
         patch(
             "app.ai.claude.agents.generator.GeneratorAgent.generate_file",

@@ -1,11 +1,10 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Download, Pencil, Loader2, History, CheckCircle2 } from 'lucide-react'
+import { Download, Pencil, Loader2, History, CheckCircle2 } from 'lucide-react'
 import { toast } from 'sonner'
 
-import Logo from '../components/Logo'
-import ThemeToggle from '../components/ThemeToggle'
+import ProjectOriginsPanel from '../components/ProjectOriginsPanel'
 import { getProject, requestChanges } from '../api/projects'
 
 const IN_PROGRESS_STATUSES = new Set([
@@ -28,7 +27,7 @@ export default function ProjectDetail() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900">
+      <div className="min-h-screen flex items-center justify-center text-text-muted bg-surface-page">
         Loading…
       </div>
     )
@@ -36,35 +35,24 @@ export default function ProjectDetail() {
 
   if (!project) {
     return (
-      <div className="min-h-screen flex items-center justify-center text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-900">
+      <div className="min-h-screen flex items-center justify-center text-text-muted bg-surface-page">
         Project not found.
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
-      <header className="border-b border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800">
-        <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between">
-          <Logo />
-          <div className="flex items-center gap-3">
-            <ThemeToggle />
-            <button onClick={() => navigate('/dashboard')} className="btn-secondary">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Dashboard
-            </button>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-surface-page">
+
 
       <main className="max-w-4xl mx-auto px-4 py-10">
         <div className="flex items-start justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">{project.name}</h1>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+            <h1 className="text-2xl font-semibold text-text-default">{project.name}</h1>
+            <p className="text-sm text-text-muted mt-1">
               Status: <span className="font-medium">{project.status?.replace(/_/g, ' ')}</span>
               {IN_PROGRESS_STATUSES.has(project.status) && project.current_stage && project.current_stage !== project.status && (
-                <span className="ml-2 text-slate-400 dark:text-slate-500">
+                <span className="ml-2 text-text-muted">
                   · stage: {project.current_stage.replace(/_/g, ' ')}
                 </span>
               )}
@@ -78,6 +66,8 @@ export default function ProjectDetail() {
             </a>
           )}
         </div>
+
+        <ProjectOriginsPanel projectId={id} project={project} />
 
         {project.status === 'deployment_failed' && (
           <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm mb-8">
@@ -100,7 +90,7 @@ export default function ProjectDetail() {
         )}
 
         {project.modification_round != null && project.modification_round > 0 && (
-          <p className="text-xs text-slate-400 dark:text-slate-500 mt-8">
+          <p className="text-xs text-text-muted mt-8">
             Modification round: {project.modification_round_completed ?? 0} / {project.modification_round}
           </p>
         )}
@@ -129,12 +119,12 @@ function ChangeRequestPanel({ projectId, project, qc }) {
   return (
     <div className="card mt-6">
       <div className="flex items-center gap-2 mb-3">
-        <Pencil className="w-5 h-5 text-primary-600" />
-        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+        <Pencil className="w-5 h-5 text-accent" />
+        <h2 className="text-base font-semibold text-text-default">
           Request changes
         </h2>
       </div>
-      <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
+      <p className="text-sm text-text-muted mb-3">
         Describe what you want changed (e.g. "make the navbar dark blue",
         "add an 'About' page", "show the price in EUR"). DeMaestro will edit only
         the files needed, re-test, and give you a new download link.
@@ -150,7 +140,7 @@ function ChangeRequestPanel({ projectId, project, qc }) {
       />
 
       {inProgress && (
-        <div className="flex items-center gap-2 text-sm text-amber-700 dark:text-amber-400 mb-3">
+        <div className="flex items-center gap-2 text-sm text-amber-700 mb-3">
           <Loader2 className="w-4 h-4 animate-spin" />
           {project?.current_stage
             ? `Stage: ${project.current_stage.replace(/_/g, ' ')}…`
@@ -159,15 +149,15 @@ function ChangeRequestPanel({ projectId, project, qc }) {
       )}
 
       {!inProgress && lastSummary && (
-        <div className="border-l-4 border-emerald-500 bg-emerald-50/40 dark:bg-emerald-600/10 p-3 rounded-r-md mb-3">
+        <div className="border-l-4 border-accent bg-accent/5 p-3 rounded-r-md mb-3">
           <div className="flex items-start gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 mt-0.5 flex-shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-accent mt-0.5 flex-shrink-0" />
             <div>
-              <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+              <p className="text-sm font-medium text-text-default">
                 Last change: {lastSummary}
               </p>
               {lastFiles.length > 0 && (
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                <p className="text-xs text-text-muted mt-1">
                   {lastFiles.length} file{lastFiles.length === 1 ? '' : 's'} updated:{' '}
                   {lastFiles.slice(0, 3).join(', ')}
                   {lastFiles.length > 3 && ` +${lastFiles.length - 3} more`}
@@ -202,18 +192,18 @@ function ModificationHistoryPanel({ history }) {
   return (
     <div className="card mt-6">
       <div className="flex items-center gap-2 mb-3">
-        <History className="w-5 h-5 text-slate-500" />
-        <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+        <History className="w-5 h-5 text-text-muted" />
+        <h2 className="text-base font-semibold text-text-default">
           Change history
         </h2>
       </div>
       <ol className="space-y-3">
         {sorted.map((h, i) => (
-          <li key={i} className="border-l-2 border-slate-200 dark:border-slate-700 pl-3">
-            <p className="text-sm font-medium text-slate-800 dark:text-slate-100">
+          <li key={i} className="border-l-2 border-surface-border pl-3">
+            <p className="text-sm font-medium text-text-default">
               {h.summary || h.request}
             </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            <p className="text-xs text-text-muted mt-0.5">
               {new Date(h.timestamp).toLocaleString()}
               {h.files_changed?.length
                 ? ` · ${h.files_changed.length} file(s)`

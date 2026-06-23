@@ -26,21 +26,37 @@ def upload_pdf(uid: str, project_id: str, input_id: str, pdf_bytes: bytes) -> st
     return upload_bytes(path, pdf_bytes, content_type="application/pdf")
 
 
-def upload_zip(uid: str, project_id: str, zip_bytes: bytes) -> str:
-    """Upload a generated-project ZIP to users/{uid}/projects/{projectId}/exports/{projectId}.zip.
+def upload_zip(uid: str, project_id: str, zip_bytes: bytes, zip_filename: str | None = None) -> str:
+    """Upload a generated-project ZIP to Cloud Storage.
+
+    zip_filename: user-visible filename (e.g. "bistro-75.zip"); defaults to
+    "{project_id}.zip" when not supplied.  The storage path always uses
+    project_id for uniqueness; zip_filename only affects the export filename.
 
     Returns the storage object path.
     """
-    path = f"users/{uid}/projects/{project_id}/exports/{project_id}.zip"
+    fname = zip_filename or f"{project_id}.zip"
+    path = f"users/{uid}/projects/{project_id}/exports/{fname}"
     return upload_bytes(path, zip_bytes, content_type="application/zip")
 
 
-def signed_download_url(blob_path: str, expires_in_days: int = 7) -> str:
-    """Return a signed URL valid for expires_in_days days (default 7)."""
+def signed_download_url(
+    blob_path: str,
+    expires_in_days: int = 7,
+    download_filename: str | None = None,
+) -> str:
+    """Return a signed URL valid for expires_in_days days (default 7).
+
+    download_filename: when set, the signed URL carries a Content-Disposition
+    header so the browser saves the file under that name (e.g. "bistro-75.zip").
+    """
     bucket = get_storage_bucket()
     blob = bucket.blob(blob_path)
-    return blob.generate_signed_url(
-        expiration=timedelta(days=expires_in_days),
-        method="GET",
-        version="v4",
-    )
+    kwargs: dict = {
+        "expiration": timedelta(days=expires_in_days),
+        "method": "GET",
+        "version": "v4",
+    }
+    if download_filename:
+        kwargs["response_disposition"] = f'attachment; filename="{download_filename}"'
+    return blob.generate_signed_url(**kwargs)

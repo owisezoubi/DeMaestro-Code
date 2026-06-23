@@ -9,8 +9,9 @@ import logging
 
 import sentry_sdk
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.auth import firebase_admin as fb
 from app.config import settings
@@ -75,6 +76,39 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- Global exception handler ----------
+# Must be registered AFTER middleware so CORS preflight (OPTIONS) is still
+# handled by CORSMiddleware, not caught here.  This handler fires only for
+# unhandled exceptions in route handlers.
+#
+# Key behaviour: we attach CORS headers manually so the browser shows the
+# real 500 JSON body instead of a CORS error masking the underlying cause.
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    log.error(
+        "unhandled_exception",
+        path=request.url.path,
+        method=request.method,
+        exc_type=type(exc).__name__,
+        exc=str(exc),
+    )
+    origin = request.headers.get("origin", "")
+    headers: dict[str, str] = {}
+    if origin:
+        headers["access-control-allow-origin"] = origin
+        headers["access-control-allow-credentials"] = "true"
+        headers["vary"] = "Origin"
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+        },
+        headers=headers,
+    )
 
 
 # ---------- Routes ----------

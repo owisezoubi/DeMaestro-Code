@@ -58,7 +58,8 @@ Your output must conform exactly to this schema:
       "key_components": ["<component name>", "..."]
     }
   ],
-  "technology_stack_notes": "<one sentence summarizing the chosen stack>"
+  "technology_stack_notes": "<one sentence summarizing the chosen stack>",
+  "landing_strategy": "<one of: auth_gate | public_home | public_landing_with_login>"
 }
 ```
 
@@ -70,6 +71,28 @@ Your output must conform exactly to this schema:
 - Every API route should correspond to at least one acceptance criterion from the user requirements
 - Every frontend page should correspond to at least one user requirement
 
+# LANDING STRATEGY -- REQUIRED FIELD
+
+Set `landing_strategy` to ONE of the following values based on the requirements:
+
+- **"auth_gate"** -- every meaningful page requires login. The product IS the logged-in
+  experience (dashboards, admin tools, personal trackers, plant care apps, todo lists).
+  Rule: if `auth_required` is true AND every non-auth page in the blueprint requires
+  a user session, use "auth_gate".
+
+- **"public_home"** -- auth is disabled OR the app has no concept of user accounts.
+  Everyone sees the same content (galleries, marketing sites, public catalogs).
+  Rule: if `auth_required` is false, ALWAYS use "public_home".
+
+- **"public_landing_with_login"** -- there is a public home page AND optional user
+  accounts. The landing is public; protected features (profile, my-items) require login.
+  Rule: if auth is enabled AND there are both public pages and protected pages, use this.
+
+Decision shortcut:
+  auth_required == false               -> "public_home"
+  auth_required == true, ALL pages protected -> "auth_gate"
+  auth_required == true, SOME pages public   -> "public_landing_with_login"
+
 # Non-Negotiable Output Rules
 
 1. Output ONLY the JSON object. No text before or after it.
@@ -77,3 +100,4 @@ Your output must conform exactly to this schema:
 3. All route paths must start with `/api/` for backend routes.
 4. Frontend routes must start with `/`.
 5. Every table must have an `id` column of type `uuid` and a `created_at` of type `timestamp`.
+6. `landing_strategy` is REQUIRED. Pick from the three values above.

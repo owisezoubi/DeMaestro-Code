@@ -1,14 +1,34 @@
+import * as React from "react"
 import { cn } from "@/lib/utils"
 
-export function Button({ className, variant = "default", size = "default", ...props }) {
+const Button = React.forwardRef(({ className, variant = "default", size = "default", ...props }, ref) => {
   const variants = {
-    default: "bg-slate-900 text-white hover:bg-slate-800",
+    default:     "bg-accent text-accent-fg hover:bg-accent/90",
     destructive: "bg-red-600 text-white hover:bg-red-700",
-    outline: "border border-slate-300 bg-white hover:bg-slate-50",
-    secondary: "bg-slate-100 text-slate-900 hover:bg-slate-200",
-    ghost: "hover:bg-slate-100",
-    link: "underline text-blue-600",
+    outline:     "border border-surface-border bg-transparent hover:bg-surface-panel text-text-default",
+    secondary:   "bg-surface-panel text-text-default hover:bg-surface-border border border-surface-border",
+    ghost:       "hover:bg-surface-border text-text-default",
+    link:        "underline text-accent",
   }
-  const sizes = { default: "h-10 px-4 py-2", sm: "h-8 px-3 text-sm", lg: "h-11 px-6", icon: "h-10 w-10" }
-  return <button className={cn("inline-flex items-center justify-center rounded-md font-medium transition-colors disabled:opacity-50", variants[variant], sizes[size], className)} {...props} />
-}
+  const sizes = {
+    default: "h-10 px-4 py-2",
+    sm:      "h-8 px-3 text-sm",
+    lg:      "h-11 px-6",
+    icon:    "h-10 w-10",
+  }
+  return (
+    <button
+      ref={ref}
+      className={cn(
+        "inline-flex items-center justify-center rounded-md font-medium transition-colors disabled:opacity-50",
+        variants[variant],
+        sizes[size],
+        className
+      )}
+      {...props}
+    />
+  )
+})
+Button.displayName = "Button"
+
+export { Button }

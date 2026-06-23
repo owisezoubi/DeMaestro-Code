@@ -4,6 +4,7 @@ Note: external deployment (Vercel/Render/GitHub) is deferred. See the
 commented-out _deploy_to_vercel / _generate_deploy_button methods at the
 bottom of this file for the partial implementation we'll re-enable later.
 """
+import re
 from datetime import datetime, timezone
 
 import structlog
@@ -12,6 +13,12 @@ from app.config import settings
 from app.models.generation_plan import GenerationPlan
 from app.models.project import ProjectStatus
 from app.services import firestore_service, storage_service, zip_service
+
+
+def _slugify(name: str) -> str:
+    """Turn 'Bistro 75' into 'bistro-75' for use as a ZIP filename."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
+    return slug or "project"
 
 
 class DeployerAgent:
@@ -26,15 +33,21 @@ class DeployerAgent:
         project_id: str,
         generated_files: dict[str, str],
         plan: GenerationPlan,
+        app_name: str | None = None,
     ) -> dict:
         """Package the generated app and return a signed download URL.
+
+        app_name: human-readable project name used to build the ZIP filename
+        (e.g. "Bistro 75" → "bistro-75.zip").  Falls back to project_id when absent.
 
         Returns: { status: "ready", zip_url: <signed_url> }
         """
         self.log.info("deploy.start", project_id=project_id, num_files=len(generated_files))
 
+        zip_filename = f"{_slugify(app_name)}.zip" if app_name else f"{project_id}.zip"
+
         if settings.mock_ai:
-            zip_url = f"https://mock-zip-url/{project_id}.zip"
+            zip_url = f"https://mock-zip-url/{zip_filename}"
             self.log.info("deploy.mock.done", project_id=project_id, zip_url=zip_url)
             return {"status": "ready", "zip_url": zip_url}
 
@@ -42,18 +55,23 @@ class DeployerAgent:
             zip_bytes = zip_service.package_project(generated_files)
             self.log.info("deploy.zip_created", project_id=project_id, zip_bytes=len(zip_bytes))
 
-            storage_path = storage_service.upload_zip(uid, project_id, zip_bytes)
+            storage_path = storage_service.upload_zip(uid, project_id, zip_bytes, zip_filename=zip_filename)
             self.log.info("deploy.uploaded", project_id=project_id, path=storage_path)
 
-            signed_url = storage_service.signed_download_url(storage_path, expires_in_days=7)
+            signed_url = storage_service.signed_download_url(
+                storage_path,
+                expires_in_days=7,
+                download_filename=zip_filename,
+            )
 
             firestore_service.update_project(uid, project_id, {
                 "zip_url": signed_url,
+                "zip_filename": zip_filename,
                 "packaged_at": datetime.now(timezone.utc).isoformat(),
                 "status": ProjectStatus.ready,
             })
 
-            self.log.info("deploy.zip_ready", project_id=project_id, zip_url=signed_url)
+            self.log.info("deploy.zip_ready", project_id=project_id, zip_url=signed_url, zip_filename=zip_filename)
             return {"status": "ready", "zip_url": signed_url}
 
         except Exception as exc:

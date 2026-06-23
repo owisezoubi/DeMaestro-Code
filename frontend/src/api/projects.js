@@ -24,6 +24,11 @@ export async function ensureUserProfile() {
   return r.data
 }
 
+export async function getProjectRawInputs(projectId) {
+  const r = await api.get(`/projects/${projectId}/raw-inputs`)
+  return r.data
+}
+
 export async function requestChanges(projectId, changeRequest) {
   const r = await api.post(
     `/projects/${projectId}/request-changes`,

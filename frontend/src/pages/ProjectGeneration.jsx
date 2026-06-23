@@ -22,7 +22,8 @@ import {
 
 import { getGenerationStatus, startGeneration, rerunTests, stopGeneration, restartFromScratch } from '../api/generation'
 import DeploymentPanel from '../components/DeploymentPanel'
-import GeneratedFileTree from '../components/GeneratedFileTree'
+import ProjectExplorer from '../components/ProjectExplorer'
+import LivePreviewCanvas from '../components/LivePreviewCanvas'
 
 // Ordered pipeline stages — each maps to one or more project statuses
 const STAGES = [
@@ -433,11 +434,29 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog, projectId
       {/* Deployment panel (animated URL button inside) */}
       {projectId && <DeploymentPanel projectId={projectId} uid={uid} />}
 
-      {/* Generated file tree */}
+      {/* Live Preview */}
       {generatedFiles && Object.keys(generatedFiles).length > 0 && (
-        <div className="card space-y-3">
-          <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Generated files</h3>
-          <GeneratedFileTree files={generatedFiles} />
+        <div className="card space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Live Preview</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Your app compiled and running live — no download needed.
+            </p>
+          </div>
+          <LivePreviewCanvas files={generatedFiles} />
+        </div>
+      )}
+
+      {/* Project Explorer */}
+      {generatedFiles && Object.keys(generatedFiles).length > 0 && (
+        <div className="card space-y-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Project Explorer</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Browse your generated files — click any file to view its source code.
+            </p>
+          </div>
+          <ProjectExplorer files={generatedFiles} />
         </div>
       )}
 

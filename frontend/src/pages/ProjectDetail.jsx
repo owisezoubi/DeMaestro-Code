@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Download, Pencil, Loader2, History, CheckCircle2 } from 'lucide-react'
+import { Download, Pencil, Loader2, History, CheckCircle2, Monitor, FolderOpen, ArrowLeft } from 'lucide-react'
 import { toast } from 'sonner'
 
 import ProjectOriginsPanel from '../components/ProjectOriginsPanel'
+import LivePreviewCanvas from '../components/LivePreviewCanvas'
+import ProjectExplorer from '../components/ProjectExplorer'
 import { getProject, requestChanges } from '../api/projects'
 
 const IN_PROGRESS_STATUSES = new Set([
@@ -46,6 +48,14 @@ export default function ProjectDetail() {
 
 
       <main className="max-w-4xl mx-auto px-4 py-10">
+        <button
+          onClick={() => navigate('/dashboard')}
+          className="flex items-center gap-1.5 text-sm text-text-muted hover:text-text-default transition-colors mb-6"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Back to Dashboard
+        </button>
+
         <div className="flex items-start justify-between mb-6">
           <div>
             <h1 className="text-2xl font-semibold text-text-default">{project.name}</h1>
@@ -68,6 +78,11 @@ export default function ProjectDetail() {
         </div>
 
         <ProjectOriginsPanel projectId={id} project={project} />
+
+        {/* Live Preview + Project Explorer — shown when files are ready */}
+        {project.generated_files && Object.keys(project.generated_files).length > 0 && (
+          <PreviewSection files={project.generated_files} />
+        )}
 
         {project.status === 'deployment_failed' && (
           <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm mb-8">
@@ -215,3 +230,47 @@ function ModificationHistoryPanel({ history }) {
     </div>
   )
 }
+
+// ── Preview section with tabs ──────────────────────────────────────────────────
+
+const PREVIEW_TABS = [
+  { id: 'preview', label: 'Live Preview', icon: Monitor },
+  { id: 'explorer', label: 'Project Explorer', icon: FolderOpen },
+]
+
+function PreviewSection({ files }) {
+  const [activeTab, setActiveTab] = useState('preview')
+
+  return (
+    <div className="card mt-6 space-y-0 !p-0 overflow-hidden">
+      {/* Tab bar */}
+      <div className="flex items-center border-b border-surface-border bg-surface-page/60 px-2 pt-2 gap-1">
+        {PREVIEW_TABS.map((tab) => {
+          const Icon = tab.icon
+          const isActive = activeTab === tab.id
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-lg border-b-2 transition-all duration-150 outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
+                isActive
+                  ? 'border-accent text-accent bg-white dark:bg-slate-900'
+                  : 'border-transparent text-text-muted hover:text-text-default hover:bg-surface-border/40'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              {tab.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Tab body */}
+      <div className="p-5">
+        {activeTab === 'preview' && <LivePreviewCanvas files={files} />}
+        {activeTab === 'explorer' && <ProjectExplorer files={files} />}
+      </div>
+    </div>
+  )
+}
+

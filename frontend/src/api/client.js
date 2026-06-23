@@ -1,7 +1,10 @@
 import axios from 'axios'
 import { auth } from '../auth/firebase'
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+// In development Vite proxies /auth, /projects, /health → localhost:8000,
+// so we use an empty baseURL (relative URLs) to avoid any cross-origin requests.
+// In production set VITE_API_BASE_URL to your deployed API origin.
+const baseURL = import.meta.env.VITE_API_BASE_URL ?? ''
 
 export const api = axios.create({
   baseURL,

@@ -6,6 +6,7 @@ Run locally with:
 
 from contextlib import asynccontextmanager
 import logging
+import time
 
 import sentry_sdk
 import structlog
@@ -109,6 +110,22 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
         },
         headers=headers,
     )
+
+
+# ---------- Slow-request logger ----------
+@app.middleware("http")
+async def _log_slow_requests(request: Request, call_next):
+    t0 = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - t0
+    if elapsed > 5.0:
+        log.warning(
+            "slow_request",
+            path=str(request.url.path),
+            method=request.method,
+            elapsed_seconds=round(elapsed, 2),
+        )
+    return response
 
 
 # ---------- Routes ----------

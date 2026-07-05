@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
@@ -244,7 +244,7 @@ export default function ProjectGeneration() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const { data: status, isLoading, error } = useQuery({
+  const { data: status, isLoading, error, isFetching } = useQuery({
     queryKey: ['generationStatus', projectId],
     queryFn: () => getGenerationStatus(projectId),
     refetchInterval: (query) => {
@@ -252,7 +252,17 @@ export default function ProjectGeneration() {
       if (TERMINAL_STATUSES.has(s)) return false
       return 2000
     },
+    retry: 3,
+    retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
   })
+
+  const CONSECUTIVE_FAIL_THRESHOLD = 5
+  const failCount = useRef(0)
+
+  useEffect(() => {
+    if (error) failCount.current += 1
+    else if (status) failCount.current = 0
+  }, [error, status])
 
   if (isLoading) {
     return (
@@ -262,12 +272,15 @@ export default function ProjectGeneration() {
     )
   }
 
-  if (error) {
+  if (error && failCount.current >= CONSECUTIVE_FAIL_THRESHOLD) {
     return (
       <div className="min-h-screen bg-surface-page flex items-center justify-center">
         <div className="rounded-xl border border-error/30 bg-error/5 p-6 w-96">
-          <h2 className="text-base font-semibold text-error mb-2">Error Loading Status</h2>
-          <p className="text-sm text-error/80 mb-4">{error.friendlyMessage || error.message}</p>
+          <h2 className="text-base font-semibold text-error mb-2">Can't reach the backend</h2>
+          <p className="text-sm text-error/80 mb-4">
+            The generation server has been unreachable for {CONSECUTIVE_FAIL_THRESHOLD * 2}
+            {' '}seconds. This usually means the backend crashed or restarted.
+          </p>
           <button className="btn-primary w-full" onClick={() => window.location.reload()}>
             Retry
           </button>
@@ -294,6 +307,18 @@ export default function ProjectGeneration() {
   return (
     <div className="relative min-h-screen bg-surface-page">
       <GenerationAmbience />
+
+      {error && failCount.current < CONSECUTIVE_FAIL_THRESHOLD && (
+        <div className="fixed top-20 right-4 z-40 animate-fade-in">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full
+                          bg-amber-500/10 border border-amber-500/40
+                          text-amber-600 dark:text-amber-400 text-xs font-medium
+                          shadow-lg backdrop-blur">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Reconnecting…
+          </div>
+        </div>
+      )}
 
       <main className="max-w-5xl mx-auto px-4 py-8 space-y-6">
         {/* Original user request */}

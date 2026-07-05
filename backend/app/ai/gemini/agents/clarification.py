@@ -71,6 +71,22 @@ class ClarificationAgent(GeminiAgent):
                 stage="apply_clarification",
             )
 
+        # Post-merge guarantee: if the clarified ambiguity was about the
+        # app name, overwrite sr.app_name directly so downstream stages
+        # (deployment slug, ZIP filename, Vercel URL) see the user's choice
+        # regardless of how the LLM reinterpreted the answer.
+        resolved_ambi = next(
+            (a for a in current.ambiguities if a.id == ambiguity_id),
+            None,
+        )
+        if resolved_ambi and getattr(resolved_ambi, "field_path", None) == "app_name":
+            result = result.model_copy(update={"app_name": answer.strip()})
+            self.log.info(
+                "clarification.app_name_updated",
+                ambiguity_id=ambiguity_id,
+                new_name=answer.strip(),
+            )
+
         self._set_state(
             last_answered_ambiguity=ambiguity_id,
             last_version_after=result.version,

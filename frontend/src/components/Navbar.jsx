@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { Settings, LogOut, ExternalLink } from 'lucide-react'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
+import { Settings, LogOut, ExternalLink, LayoutDashboard, Info } from 'lucide-react'
 
 import Logo from '@/components/Logo'
 import ThemeToggle from '@/components/ThemeToggle'
 import { useAuth } from '@/context/AuthContext'
+
 
 function ProfileMenu() {
   const { user, logout } = useAuth()
@@ -104,29 +105,76 @@ function ProfileMenu() {
   )
 }
 
-export default function Navbar() {
+function NavItem({ to, label, icon: Icon, active }) {
   return (
-    <header className="sticky top-0 z-50 backdrop-blur-md bg-surface-panel/80 border-b border-surface-border shadow-sm">
-      <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
-        {/* Brand */}
-        <Link to="/welcome" className="flex items-center gap-3">
-          <Logo size={56} hoverable />
-          <span className="text-2xl font-black tracking-tight
-                           bg-gradient-to-r from-accent to-accent-secondary
-                           bg-clip-text text-transparent
-                           hidden sm:block">
-            DeMaestro
-          </span>
-        </Link>
+    <Link
+      to={to}
+      className={`group relative flex items-center gap-1.5 px-3 py-2 rounded-lg
+                 text-sm font-medium transition-all duration-200
+                 ${active
+                   ? 'text-accent bg-accent/10'
+                   : 'text-text-muted hover:text-text-default hover:bg-accent/5'}`}
+    >
+      {Icon && <Icon className="w-4 h-4" />}
+      <span className="hidden sm:inline">{label}</span>
 
-        {/* Right side */}
-        <div className="flex items-center gap-4">
-          <Link
-            to="/about"
-            className="text-sm font-medium text-text-muted hover:text-text-default transition-colors hidden sm:inline"
-          >
-            About Us
+      {/* Active underline */}
+      {active && (
+        <span className="absolute -bottom-1 left-3 right-3 h-0.5
+                         bg-gradient-to-r from-accent to-accent-secondary
+                         rounded-full" />
+      )}
+
+      {/* Hover shine */}
+      {!active && (
+        <span className="absolute inset-0 pointer-events-none rounded-lg
+                         bg-gradient-to-r from-transparent via-accent/5 to-transparent
+                         opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+      )}
+    </Link>
+  )
+}
+
+export default function Navbar() {
+  const location = useLocation()
+
+  return (
+    <header className="fixed inset-x-0 top-0 z-50 backdrop-blur-md
+                      bg-surface-panel/80 border-b border-surface-border shadow-sm">
+      <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between gap-4">
+
+        {/* LEFT: Brand + primary nav */}
+        <div className="flex items-center gap-3 min-w-0">
+          <Link to="/welcome" className="flex items-center gap-3 flex-shrink-0">
+            <Logo size={56} hoverable />
+            <span className="text-2xl font-black tracking-tight
+                             bg-gradient-to-r from-accent to-accent-secondary
+                             bg-clip-text text-transparent
+                             hidden sm:block">
+              DeMaestro
+            </span>
           </Link>
+
+          <div className="w-px h-8 bg-surface-border hidden md:block" />
+
+          <nav className="flex items-center gap-1">
+            <NavItem
+              to="/dashboard"
+              label="Dashboard"
+              icon={LayoutDashboard}
+              active={location.pathname === '/dashboard'}
+            />
+            <NavItem
+              to="/about"
+              label="About"
+              icon={Info}
+              active={location.pathname === '/about'}
+            />
+          </nav>
+        </div>
+
+        {/* RIGHT: Theme toggle + Profile */}
+        <div className="flex items-center gap-2 flex-shrink-0">
           <ThemeToggle />
           <ProfileMenu />
         </div>

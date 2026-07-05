@@ -8,28 +8,34 @@ import { getProjectStatus } from '../api/requirements'
 import { triggerStructuring, getClarifications, answerClarificationsBatch, getClarificationProgress, saveClarificationProgress } from '../api/structure'
 import { getProject } from '../api/projects'
 import { startGeneration } from '../api/generation'
+import ClarificationLoader from '../components/ClarificationLoader'
+import StructuringLoader from '../components/StructuringLoader'
 
-const TERMINAL = new Set(['ready', 'ready_with_warnings', 'failed', 'awaiting_approval'])
+const TERMINAL = new Set([
+  'ready', 'ready_with_warnings', 'deployed',
+  'failed', 'tests_failed_recoverable', 'stopped',
+  'awaiting_approval',
+])
 
 const STATUS_STYLES = {
-  awaiting_input: 'bg-slate-100 text-slate-700',
-  structuring: 'bg-amber-100 text-amber-800',
-  clarifying: 'bg-amber-100 text-amber-800',
+  awaiting_input:    'bg-slate-100 text-slate-700',
+  structuring:       'bg-amber-100 text-amber-800',
+  clarifying:        'bg-amber-100 text-amber-800',
   awaiting_approval: 'bg-orange-100 text-orange-800',
-  blueprinting: 'bg-blue-100 text-blue-800',
-  generating: 'bg-blue-100 text-blue-800',
-  verifying: 'bg-blue-100 text-blue-800',
-  packaging: 'bg-blue-100 text-blue-800',
-  ready: 'bg-emerald-100 text-emerald-800',
-  failed: 'bg-red-100 text-red-800',
+  blueprinting:      'bg-blue-100 text-blue-800',
+  generating:        'bg-blue-100 text-blue-800',
+  verifying:         'bg-blue-100 text-blue-800',
+  packaging:         'bg-blue-100 text-blue-800',
+  ready:             'bg-emerald-100 text-emerald-800',
+  failed:            'bg-red-100 text-red-800',
 }
 
 const STATUS_DESC = {
   blueprinting: 'Designing the application blueprint…',
-  generating: 'Generating your application code…',
-  verifying: 'Verifying the generated code…',
-  packaging: 'Packaging your application…',
-  ready: 'Your application is ready!',
+  generating:   'Generating your application code…',
+  verifying:    'Verifying the generated code…',
+  packaging:    'Packaging your application…',
+  ready:        'Your application is ready!',
 }
 
 export default function ProjectChat() {
@@ -45,6 +51,22 @@ export default function ProjectChat() {
   })
 
   const status = statusData?.status
+
+  // Bounce any state that belongs to the generation page so we never get
+  // stuck polling here. replace:true keeps the back button clean.
+  useEffect(() => {
+    if (!status) return
+    const generationStates = new Set([
+      'blueprinting', 'generating', 'generated', 'testing', 'tested',
+      'verifying', 'verified', 'deploying', 'packaging',
+      'ready', 'ready_with_warnings', 'deployed',
+      'modifying', 'regenerating',
+      'tests_failed_recoverable', 'failed', 'stopped',
+    ])
+    if (generationStates.has(status)) {
+      navigate(`/projects/${projectId}/generation`, { replace: true })
+    }
+  }, [status, projectId, navigate])
 
   const { data: clarifications = [], isLoading: clarificationsLoading } = useQuery({
     queryKey: ['clarifications', projectId],
@@ -65,12 +87,35 @@ export default function ProjectChat() {
     }
   }, [projectId, qc])
 
-  return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+  const isMigratingAway = status && [
+    'blueprinting', 'generating', 'generated', 'testing', 'tested',
+    'verifying', 'verified', 'deploying', 'packaging',
+    'ready', 'ready_with_warnings', 'deployed',
+    'modifying', 'regenerating',
+    'tests_failed_recoverable', 'failed', 'stopped',
+  ].includes(status)
 
+  if (isMigratingAway) {
+    return (
+      <div className="min-h-screen bg-surface-page flex items-center justify-center">
+        <div className="flex items-center gap-3 text-text-muted">
+          <Loader2 className="w-5 h-5 animate-spin text-accent" />
+          <span className="text-sm">Loading project…</span>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-surface-page relative overflow-x-hidden">
+      {/* Ambient page blobs */}
+      <div className="fixed top-1/4 -left-40 w-96 h-96 rounded-full
+                      bg-accent/[0.08] blur-3xl pointer-events-none" />
+      <div className="fixed bottom-1/4 -right-40 w-96 h-96 rounded-full
+                      bg-accent-secondary/[0.08] blur-3xl pointer-events-none" />
 
       {status && (
-        <div className="max-w-2xl mx-auto px-4 pt-4">
+        <div className="max-w-3xl mx-auto px-4 pt-4">
           <span
             className={`text-xs px-2.5 py-1 rounded-full font-medium ${STATUS_STYLES[status] ?? 'bg-slate-100 text-slate-700'}`}
           >
@@ -79,7 +124,7 @@ export default function ProjectChat() {
         </div>
       )}
 
-      <main className="max-w-2xl mx-auto px-4 py-6">
+      <main className="max-w-3xl mx-auto px-4 py-6">
         <MainContent
           status={status}
           projectId={projectId}
@@ -115,13 +160,7 @@ function MainContent({ status, projectId, clarifications, clarificationsLoading,
   }
 
   if (status === 'structuring') {
-    return (
-      <div className="card flex flex-col items-center py-12 text-center">
-        <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />
-        <p className="font-medium text-slate-900 dark:text-slate-100">Analyzing your requirements with AI…</p>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Usually 10–30 seconds.</p>
-      </div>
-    )
+    return <StructuringLoader />
   }
 
   if (status === 'clarifying') {
@@ -238,9 +277,7 @@ function FailedCard({ projectId, qc }) {
       </p>
       {project?.last_failed_checks?.length > 0 && (
         <div className="mb-4 text-sm">
-          <p className="font-semibold text-slate-800 dark:text-slate-100">
-            Failed checks:
-          </p>
+          <p className="font-semibold text-slate-800 dark:text-slate-100">Failed checks:</p>
           <ul className="list-disc list-inside text-slate-600 dark:text-slate-400">
             {project.last_failed_checks.map((c) => (
               <li key={c}>{c}</li>
@@ -249,8 +286,10 @@ function FailedCard({ projectId, qc }) {
         </div>
       )}
       {errorMessage && (
-        <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-md mb-4 max-w-md text-left font-mono break-words">
-          <span className="font-semibold not-italic">Previous error:</span><br/>
+        <div className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20
+                        border border-red-200 dark:border-red-800 px-3 py-2 rounded-md mb-4
+                        max-w-md text-left font-mono break-words">
+          <span className="font-semibold not-italic">Previous error:</span><br />
           {errorMessage.length > 400 ? errorMessage.slice(0, 400) + '…' : errorMessage}
         </div>
       )}
@@ -263,6 +302,17 @@ function FailedCard({ projectId, qc }) {
       </button>
     </div>
   )
+}
+
+const ENG_KEYWORDS = [
+  'wcag', 'contrast ratio', 'api', 'endpoint', 'schema', 'entity',
+  'model', 'framework', 'measurable criterion', 'authenticated',
+  'unauthenticated', 'replace with', 'clarify whether', 'align all',
+]
+
+function isEngineeringLanguage(opt) {
+  const t = (opt || '').toLowerCase()
+  return ENG_KEYWORDS.some((k) => t.includes(k))
 }
 
 function ClarificationWizard({ clarifications, projectId, qc }) {
@@ -309,22 +359,11 @@ function ClarificationWizard({ clarifications, projectId, qc }) {
   })
 
   if (submitMut.isPending) {
-    return (
-      <div className="card flex flex-col items-center py-12 text-center">
-        <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />
-        <p className="font-medium text-slate-900 dark:text-slate-100">Refining your requirements…</p>
-        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-          You answered everything — this part takes a moment.
-        </p>
-      </div>
-    )
+    return <ClarificationLoader mode="refine" />
   }
+
   if (!clarifications.length) {
-    return (
-      <div className="card flex items-center gap-3 text-slate-500 dark:text-slate-400">
-        <Loader2 className="w-5 h-5 animate-spin" /><span>Loading questions…</span>
-      </div>
-    )
+    return <StructuringLoader />
   }
 
   const total = clarifications.length
@@ -344,58 +383,152 @@ function ClarificationWizard({ clarifications, projectId, qc }) {
   }
 
   return (
-    <div className="card space-y-4">
-      {/* progress */}
-      <div>
-        <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
-          <span>Question {index + 1} of {total}</span>
+    <div className="relative animate-fade-in">
+      {/* Ambient blobs behind the card */}
+      <div className="absolute -top-8 -left-8 w-40 h-40 rounded-full
+                      bg-accent/10 blur-3xl pointer-events-none" />
+      <div className="absolute -bottom-8 -right-8 w-40 h-40 rounded-full
+                      bg-accent-secondary/10 blur-3xl pointer-events-none" />
+
+      {/* Progress ribbon */}
+      <div className="mb-6">
+        <div className="flex justify-between items-center text-xs text-text-muted mb-2">
+          <span className="uppercase tracking-wider font-semibold text-accent">
+            Question {index + 1} of {total}
+          </span>
           {index > 0 && (
-            <button onClick={() => setIndex((i) => Math.max(0, i - 1))}
-              className="hover:text-slate-800 dark:hover:text-slate-200">← Back</button>
+            <button
+              onClick={() => setIndex((i) => Math.max(0, i - 1))}
+              className="hover:text-text-default transition-colors flex items-center gap-1"
+            >
+              ← Back
+            </button>
           )}
         </div>
-        <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
-          <div className="h-full bg-primary-600 transition-all"
-               style={{ width: `${((index) / total) * 100}%` }} />
+        <div className="relative h-2 w-full rounded-full bg-surface-border overflow-hidden">
+          <div
+            className="absolute inset-y-0 left-0 rounded-full
+                       bg-gradient-to-r from-accent to-accent-secondary
+                       transition-all duration-500 ease-out"
+            style={{ width: `${((index + 1) / total) * 100}%` }}
+          />
+          {/* Shimmer sweep on the progress bar */}
+          <div className="absolute inset-0 pointer-events-none
+                          bg-gradient-to-r from-transparent via-white/30 to-transparent
+                          -translate-x-full animate-shimmer" />
         </div>
       </div>
 
-      <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">{current.reason}</h2>
-      <p className="text-sm text-slate-500 dark:text-slate-400">Pick the best option, or type your own.</p>
+      {/* Question card */}
+      <div
+        key={current.id}
+        className="relative rounded-2xl border border-surface-border
+                   bg-surface-panel/80 backdrop-blur-md
+                   shadow-2xl shadow-accent/5
+                   overflow-hidden animate-question-in"
+      >
+        {/* Top gradient accent bar */}
+        <div className="absolute inset-x-0 top-0 h-1
+                        bg-gradient-to-r from-accent via-accent-secondary to-accent
+                        bg-[length:200%_auto] animate-gradient" />
 
-      <div className="flex flex-wrap gap-2">
-        {(current.suggested_options ?? []).map((opt) => (
-          <button key={opt} onClick={() => record(opt)}
-            className="rounded-full bg-primary-50 dark:bg-primary-600/20 text-primary-700 dark:text-primary-200 px-4 py-2 text-sm hover:bg-primary-100 dark:hover:bg-primary-600/30 transition-colors">
-            {opt}
-          </button>
-        ))}
-        {(current.suggested_options ?? []).length > 0 && (
-          <button
-            onClick={() => record(current.suggested_options[0])}
-            className="rounded-full bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-4 py-2 text-sm hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-            title={`Use ${current.suggested_options[0]}`}
-          >
-            I don&apos;t know — use the default:{' '}
-            <span className="font-medium">{current.suggested_options[0]}</span>
-          </button>
-        )}
-      </div>
+        <div className="p-8 md:p-10">
+          {/* Question badge */}
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full
+                          bg-accent/10 border border-accent/20 mb-5">
+            <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-accent">
+              Quick question
+            </span>
+          </div>
 
-      <div className="flex items-center gap-3">
-        <div className="flex-1 border-t border-slate-200 dark:border-slate-700" />
-        <span className="text-xs text-slate-400">Or type your own:</span>
-        <div className="flex-1 border-t border-slate-200 dark:border-slate-700" />
-      </div>
+          {/* The question */}
+          <h2 className="text-2xl md:text-3xl font-bold text-text-default mb-3 leading-tight">
+            {current.reason}
+          </h2>
+          <p className="text-sm text-text-muted mb-8">
+            Pick one of the options below, or type your own answer.
+          </p>
 
-      <div className="flex gap-2">
-        <input type="text" value={freeText} onChange={(e) => setFreeText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter' && freeText.trim()) record(freeText.trim()) }}
-          placeholder="Type your answer…" className="input flex-1" />
-        <button disabled={!freeText.trim()} onClick={() => { if (freeText.trim()) record(freeText.trim()) }}
-          className="btn-primary">
-          {isLast ? 'Finish' : 'Next'}
-        </button>
+          {/* Option pills */}
+          <div className="flex flex-wrap gap-2.5 mb-8">
+            {(() => {
+              const allOpts = current.suggested_options ?? []
+              const filtered = allOpts.filter((opt) => {
+                if (isEngineeringLanguage(opt)) {
+                  console.warn('[ClarificationWizard] Filtered engineering option:', opt)
+                  return false
+                }
+                return true
+              })
+              return filtered.map((opt, i) => (
+                <button
+                  key={opt}
+                  onClick={() => record(opt)}
+                  className="group relative overflow-hidden
+                             px-5 py-3 rounded-xl
+                             bg-gradient-to-br from-accent/5 to-accent-secondary/5
+                             border border-accent/20
+                             text-text-default text-sm font-medium
+                             hover:border-accent/50
+                             hover:from-accent/10 hover:to-accent-secondary/10
+                             hover:shadow-lg hover:shadow-accent/15
+                             hover:-translate-y-0.5
+                             active:translate-y-0
+                             transition-all duration-200
+                             animate-fade-in"
+                  style={{ animationDelay: `${i * 60}ms` }}
+                >
+                  <span className="relative z-10">{opt}</span>
+                  {/* Hover shine sweep */}
+                  <span className="absolute inset-0 pointer-events-none
+                                   bg-gradient-to-tr from-transparent via-white/10 to-transparent
+                                   -translate-x-full group-hover:translate-x-full
+                                   transition-transform duration-700" />
+                </button>
+              ))
+            })()}
+          </div>
+
+          {/* Divider */}
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex-1 border-t border-surface-border/60" />
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+              Or type your own
+            </span>
+            <div className="flex-1 border-t border-surface-border/60" />
+          </div>
+
+          {/* Free-text input */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={freeText}
+              onChange={(e) => setFreeText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && freeText.trim()) record(freeText.trim()) }}
+              placeholder="Type your answer…"
+              className="flex-1 px-4 py-3 rounded-xl
+                         bg-surface-page/50 border border-surface-border
+                         text-text-default placeholder:text-text-muted/60
+                         focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent
+                         transition-all duration-200"
+            />
+            <button
+              disabled={!freeText.trim()}
+              onClick={() => { if (freeText.trim()) record(freeText.trim()) }}
+              className="px-6 py-3 rounded-xl font-semibold text-sm text-white
+                         bg-gradient-to-r from-accent to-accent-secondary
+                         shadow-lg shadow-accent/25
+                         hover:shadow-xl hover:shadow-accent/35
+                         hover:scale-[1.02] active:scale-[0.98]
+                         disabled:opacity-40 disabled:cursor-not-allowed
+                         disabled:scale-100 disabled:shadow-none
+                         transition-all duration-200"
+            >
+              {isLast ? 'Finish' : 'Next →'}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )

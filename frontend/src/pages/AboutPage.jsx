@@ -1,14 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Sparkles, Code2, Rocket, GraduationCap } from 'lucide-react'
 import Logo from '@/components/Logo'
 
-// TODO: Add real photos to frontend/src/assets/team/
-// Expected files: owise.jpg, mohamad.jpg, natalie.jpg
-// The component falls back to a gradient initial bubble when images are missing.
-const owisePhoto = null
-const mohamadPhoto = null
-const supervisorPhoto = null
+// Team photos — served as static files from frontend/public/team/
+// Drop the JPGs into that folder using the exact filenames below.
+// See frontend/public/team/README.md for specs and fallback behavior.
+// The AvatarCircle component + supervisor <img> fall back to a
+// gradient initial bubble automatically if a file is missing.
+const owisePhoto      = '/team/owise.jpg'
+const mohamadPhoto    = '/team/mohamad.jpg'
+const supervisorPhoto = '/team/natalie.jpg'
 
 function FadeInOnScroll({ children, delay = 0 }) {
   const ref = useRef(null)
@@ -35,11 +37,12 @@ function FadeInOnScroll({ children, delay = 0 }) {
 }
 
 function AvatarCircle({ photo, name, size = 'lg' }) {
+  const [failed, setFailed] = useState(false)
   const isLg = size === 'lg'
   const dim = isLg ? 'w-32 h-32' : 'w-28 h-28'
   const textSize = isLg ? 'text-4xl' : 'text-3xl'
 
-  if (photo) {
+  if (photo && !failed) {
     return (
       <div className={`relative ${dim} mx-auto`}>
         <div className="absolute inset-0 rounded-full
@@ -48,6 +51,7 @@ function AvatarCircle({ photo, name, size = 'lg' }) {
         <img
           src={photo}
           alt={name}
+          onError={() => setFailed(true)}
           className="relative w-full h-full rounded-full object-cover
                      ring-4 ring-surface-panel shadow-xl
                      group-hover:scale-105 transition-transform duration-300"
@@ -69,6 +73,52 @@ function AvatarCircle({ photo, name, size = 'lg' }) {
         <span className={`text-white ${textSize} font-black`}>{name[0]}</span>
       </div>
     </div>
+  )
+}
+
+function SupervisorCard({ photo }) {
+  const [failed, setFailed] = useState(false)
+  const showPhoto = photo && !failed
+
+  return (
+    <FadeInOnScroll>
+      <div className="relative max-w-md mx-auto mt-8 p-8 pt-12 rounded-3xl
+                      bg-surface-panel border border-surface-border
+                      hover:border-accent/40 hover:shadow-2xl hover:shadow-accent/15
+                      transition-all duration-500 text-center group">
+        <div className="absolute top-4 left-1/2 -translate-x-1/2
+                        px-3 py-1 rounded-full bg-accent/10 border border-accent/20
+                        flex items-center gap-1.5 text-xs font-semibold text-accent
+                        whitespace-nowrap">
+          <GraduationCap className="w-3.5 h-3.5 flex-shrink-0" />
+          Supervisor
+        </div>
+
+        <div className="relative w-28 h-28 mx-auto mb-5 mt-2">
+          <div className="absolute inset-0 rounded-full
+                          bg-gradient-to-br from-accent to-accent-secondary
+                          opacity-40 blur-md" />
+          {showPhoto ? (
+            <img
+              src={photo}
+              alt="Dr. Natalie Levi"
+              onError={() => setFailed(true)}
+              className="relative w-full h-full rounded-full object-cover
+                         ring-4 ring-surface-panel shadow-xl"
+            />
+          ) : (
+            <div className="relative w-full h-full rounded-full
+                            bg-gradient-to-br from-accent to-accent-secondary
+                            flex items-center justify-center
+                            ring-4 ring-surface-panel shadow-xl">
+              <span className="text-white text-3xl font-black">N</span>
+            </div>
+          )}
+        </div>
+        <h3 className="text-lg font-bold text-text-default">Dr. Natalie Levi</h3>
+        <p className="text-sm text-text-muted">Academic Advisor</p>
+      </div>
+    </FadeInOnScroll>
   )
 }
 
@@ -212,44 +262,7 @@ export default function AboutPage() {
           </div>
 
           {/* Supervisor — badge fully inside card (no overflow clip issue) */}
-          <FadeInOnScroll>
-            <div className="relative max-w-md mx-auto mt-8 p-8 pt-12 rounded-3xl
-                            bg-surface-panel border border-surface-border
-                            hover:border-accent/40 hover:shadow-2xl hover:shadow-accent/15
-                            transition-all duration-500 text-center group">
-              {/* Badge inside card, positioned at top center */}
-              <div className="absolute top-4 left-1/2 -translate-x-1/2
-                              px-3 py-1 rounded-full bg-accent/10 border border-accent/20
-                              flex items-center gap-1.5 text-xs font-semibold text-accent
-                              whitespace-nowrap">
-                <GraduationCap className="w-3.5 h-3.5 flex-shrink-0" />
-                Supervisor
-              </div>
-
-              <div className="relative w-28 h-28 mx-auto mb-5 mt-2">
-                <div className="absolute inset-0 rounded-full
-                                bg-gradient-to-br from-accent to-accent-secondary
-                                opacity-40 blur-md" />
-                {supervisorPhoto ? (
-                  <img
-                    src={supervisorPhoto}
-                    alt="Dr. Natalie Levi"
-                    className="relative w-full h-full rounded-full object-cover
-                               ring-4 ring-surface-panel shadow-xl"
-                  />
-                ) : (
-                  <div className="relative w-full h-full rounded-full
-                                  bg-gradient-to-br from-accent to-accent-secondary
-                                  flex items-center justify-center
-                                  ring-4 ring-surface-panel shadow-xl">
-                    <span className="text-white text-3xl font-black">N</span>
-                  </div>
-                )}
-              </div>
-              <h3 className="text-lg font-bold text-text-default">Dr. Natalie Levi</h3>
-              <p className="text-sm text-text-muted">Academic Advisor</p>
-            </div>
-          </FadeInOnScroll>
+          <SupervisorCard photo={supervisorPhoto} />
         </div>
       </section>
 

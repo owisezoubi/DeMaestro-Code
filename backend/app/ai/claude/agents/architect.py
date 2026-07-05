@@ -111,12 +111,53 @@ For every frontend page, add a page item:
 
 For seed data, add a seed item per model with realistic example rows:
   {"id": "seed.menu_items", "type": "seed",
-   "model": "MenuItem", "count": 8,
-   "sample_data": [{"name": "Margherita", "price": 12.99}]}
+   "model": "MenuItem", "count": 20,
+   "sample_data": [{"name": "Margherita Pizza", "price": 12.99, "description": "Classic tomato and mozzarella"}]}
 
-For palette or styling rules, add style items:
-  {"id": "style.primary_color", "type": "style",
-   "css_var": "--color-primary", "value": "#7C3AED", "scope": "global"}
+MANDATORY SEED MINIMUMS — sparse seeds make the deployed app look broken:
+
+For any model that appears in a user-facing LIST endpoint (browse, menu, gallery,
+feed, catalog, directory), set count to AT LEAST:
+  - 15 for browse-heavy apps (menus, recipes, portfolios, catalogs, marketplaces)
+  - 10 for list-mainly apps (todos, notes, contacts, projects)
+  - 5 for admin-facing lists (orders, submissions, reports)
+
+For SUPPORTING models (categories, tags, statuses) seed a realistic default
+set — e.g. for a menu app: 5 categories (Appetizers, Mains, Desserts, Drinks, Sides).
+
+For MEDIA columns (image_url, avatar, cover_image, photo), use:
+  https://picsum.photos/seed/<slug>/<width>/<height>
+so seeded rows have real-looking images without requiring image hosting.
+
+For PRICE / NUMERIC columns, use realistic domain ranges:
+  - Restaurant menu: $6–$35 per dish
+  - E-commerce: $10–$200 per product
+  A $2 pizza or $0 product looks broken.
+
+For palette or styling rules, add style items.
+
+CRITICAL — the scaffold's index.css uses RGB-triplet CSS variables so
+Tailwind can compose alpha with `rgb(var(--accent) / <alpha-value>)`.
+You MUST emit:
+  - css_var: "--accent"        (the ONLY palette var to override; NEVER use --color-primary, --primary, etc.)
+  - value:   "R G B" triplet   (e.g. "220 38 38" for red-600). NEVER hex, NEVER rgb(...), NEVER hsl(...).
+
+Examples by intent:
+  red:     {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "220 38 38",   "scope": "global"}
+  blue:    {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "37 99 235",   "scope": "global"}
+  green:   {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "22 163 74",   "scope": "global"}
+  amber:   {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "217 119 6",   "scope": "global"}
+  purple:  {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "124 58 237",  "scope": "global"}
+  pink:    {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "219 39 119",  "scope": "global"}
+  emerald: {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "5 150 105",   "scope": "global"}
+  teal:    {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "13 148 136",  "scope": "global"}
+  slate:   {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "71 85 105",   "scope": "global"}
+  black:   {"id": "style.primary_color", "type": "style", "css_var": "--accent", "value": "23 23 23",    "scope": "global"}
+
+If the user requested a color verbatim (e.g. "red website"), you MUST
+emit exactly one style item with css_var "--accent" matching that color.
+Do NOT add other style items for that intent — overriding only --accent
+keeps surface and text neutrals readable.
 
 Coverage rules (every item below MUST have a checklist entry):
 - Every route the blueprint contract specifies MUST have a route item.

@@ -221,6 +221,16 @@ async def get_generation_status(project_id: str, user: CurrentUser) -> dict:
         except Exception:
             sr_payload = None
 
+    # Fetch the original text the user typed on /projects/new (or extracted PDF text).
+    initial_request = None
+    try:
+        raw_inputs = firestore_service.list_raw_inputs(user.uid, project_id)
+        if raw_inputs:
+            first = raw_inputs[0]
+            initial_request = first.content or first.extracted_text
+    except Exception:
+        initial_request = None
+
     return {
         "project_id": project_id,
         "status": project.status.value,
@@ -246,6 +256,10 @@ async def get_generation_status(project_id: str, user: CurrentUser) -> dict:
         # Checklist coverage
         "checklist": project.checklist or [],
         "checklist_results": project.checklist_results or [],
+        # File explorer — always returned; empty until generation completes.
+        "generated_files": project.generated_files or {},
+        # Original user input
+        "initial_request": initial_request,
     }
 
 

@@ -29,8 +29,9 @@ Your output must conform exactly to this schema:
       "requirement_id": "<UR-XX id of the affected requirement, or 'set' for cross-cutting consistency issues>",
       "fundamental": "<consistency | unambiguity>",
       "severity": "<error | warning>",
-      "description": "<concise description of the issue — one sentence>",
-      "suggested_fix": "<optional: how to rewrite the statement to resolve the issue>"
+      "description": "<friendly plain-English question — see rules below>",
+      "user_options": ["<option 1>", "<option 2>", "<optional option 3>"],
+      "suggested_fix": "<optional internal engineering note — never shown to user>"
     }
   ]
 }
@@ -48,47 +49,94 @@ Your output must conform exactly to this schema:
 6. **If there are no issues, output `{"issues": []}`.**
 7. Do not repeat issues already evident from the validation fields in the input JSON (those were caught algorithmically).
 
-# Language Rules for Issue Descriptions
+# Language Rules — `description`
 
-The `description` is shown WORD-FOR-WORD to a non-technical end user as a question.
-Write it as a short, friendly, plain-English question about what the user wants —
-never a technical observation or spec review.
+`description` is shown WORD-FOR-WORD to a non-technical end user as a
+QUESTION. It must ask about the user's PREFERENCE — never about
+measurability, testability, or how to fix the spec.
 
-Hard rules for `description`:
-- NEVER mention internal requirement IDs (UR-11, FR-3, AMB-02, etc.). The user has
-  never seen these. Refer to the feature in plain words ("your reading list",
-  "signing in") instead.
-- NEVER use technical/data-modelling words: schema, database, table, column, field,
-  entity, object, model, record, attribute, API, endpoint, JSON, code,
-  implementation, architecture, stack, framework, enum.
-- Phrase as a question the user can answer, e.g. "I want to make sure I understand
-  how you'd like X to work. Can you tell me…?"
-- Keep it to 1–2 short sentences.
+Do:
+- Ask what the user WANTS. Examples:
+  - "What colors would you like the app to use?"
+  - "Should people log in to use the app?"
+  - "Who can see other people's posts — only their friends, or everyone?"
+- Use everyday words. 1–2 short sentences.
 
-IDs belong only in the `requirement_id` field (internal). `suggested_fix` is also
-internal. ONLY `description` is user-facing.
+Don't:
+- Ask meta questions like "How will we know if the colors are clear enough?"
+- Use technical/engineering vocabulary: WCAG, contrast ratio, schema,
+  database, endpoint, API, model, entity, authenticated, unauthenticated,
+  measurable criterion, acceptance criterion, spec, requirement ID.
+- Mention internal IDs (UR-11, AMB-02).
+
+# Language Rules — `user_options`
+
+Provide 2 to 4 CONCRETE ANSWER CHOICES the user can literally click.
+They must be direct answers to the `description` — never instructions
+for a developer.
+
+Rules:
+- Each option is a full ANSWER, phrased as a concrete preference. Example:
+    Description: "Should people log in to use the app?"
+    user_options: ["Yes, everyone signs in", "No, anyone can use it without signing in"]
+- Each option is at most ~10 words.
+- No developer vocabulary. No "Replace X with Y". No "Clarify whether…".
+  No "WCAG / API / schema / authenticated".
+- Options are mutually exclusive when possible.
+- Do NOT include "Other" — the UI provides a free-text input automatically.
+
+# Language Rules — `suggested_fix`
+
+`suggested_fix` is INTERNAL. It goes to the code-generation team and will
+NEVER be shown to a user. Use any engineering language you need. Keep it short.
 
 # Examples
 
-## Good: Consistency error (cross-cutting)
+## GOOD — consistency error (cross-cutting)
 ```json
 {
   "requirement_id": "set",
   "fundamental": "consistency",
   "severity": "error",
-  "description": "I want to make sure I understand how recipes are shared. Should everyone be able to see each other's recipes, or should each person only see their own?",
-  "suggested_fix": "Decide whether the app has a shared recipe feed or per-user private collections."
+  "description": "Should people log in to use the app?",
+  "user_options": ["Yes, everyone signs in with email and password", "No, anyone can use it without signing in"],
+  "suggested_fix": "Resolve authenticated vs anonymous conflict; align all UR entries; remove contradictory summary statement."
 }
 ```
 
-## Good: Semantic ambiguity
+## GOOD — semantic ambiguity
 ```json
 {
   "requirement_id": "UR-05",
   "fundamental": "unambiguity",
   "severity": "error",
-  "description": "I want to make sure I understand how fast the app should feel. Roughly how quickly should things respond after someone taps or clicks?",
-  "suggested_fix": "Replace with a concrete bound, e.g., 'the system responds within 2 seconds for all user actions.'"
+  "description": "What colors would you like the app to use?",
+  "user_options": ["Warm and modern (soft orange, cream)", "Cool and professional (blue, slate)", "Bold and playful (bright pink, purple)", "Dark mode with one accent color"],
+  "suggested_fix": "Replace vague 'clearly visible' language with explicit palette; enforce WCAG 2.1 AA contrast at build time."
+}
+```
+
+## BAD — leaks engineering into user text
+```json
+{
+  "requirement_id": "set",
+  "fundamental": "consistency",
+  "severity": "error",
+  "description": "Should DoListy be authenticated or anonymous?",
+  "user_options": ["Clarify whether DoListy is an authenticated, personal task manager or a public, anonymous task manager. Remove the contradictory statement."],
+  "suggested_fix": null
+}
+```
+
+## BAD — meta question + engineering option
+```json
+{
+  "requirement_id": "UR-05",
+  "fundamental": "unambiguity",
+  "severity": "error",
+  "description": "I want to make sure I understand what 'clearly visible' means. How will we know if colors are clear enough?",
+  "user_options": ["Replace with a measurable accessibility standard, e.g. WCAG 2.1 AA contrast ratio guidelines."],
+  "suggested_fix": null
 }
 ```
 

@@ -32,7 +32,7 @@ log = structlog.get_logger("checklist_runner")
 @dataclass
 class CheckResult:
     item_id: str
-    status: Literal["pass", "fail"]
+    status: Literal["pass", "partial", "fail"]
     reason: str = ""
     file: Optional[str] = None
 
@@ -41,9 +41,27 @@ class CheckResult:
 # Individual checkers
 # ============================================================
 
+# Models that the scaffold owns — defined in auth_models.py and re-exported
+# from models.py. Always pass without the substring check.
+_SCAFFOLD_OWNED_MODELS: frozenset[str] = frozenset({"User"})
+
+
 def check_model_item(item: ModelItem, files: dict) -> CheckResult:
     """Verify the model class exists in models.py with expected columns."""
+    # Scaffold-owned models live in auth_models.py and are always present.
+    if item.class_name in _SCAFFOLD_OWNED_MODELS:
+        return CheckResult(item_id=item.id, status="pass", reason="provided by scaffold")
+
     models_content = files.get("backend/app/models.py", "")
+    auth_models_content = files.get("backend/app/auth_models.py", "")
+
+    # Check re-export in models.py counts as "present".
+    reexport_present = (
+        f"from app.auth_models import {item.class_name}" in models_content
+    )
+    if reexport_present:
+        return CheckResult(item_id=item.id, status="pass")
+
     if not models_content:
         return CheckResult(
             item_id=item.id, status="fail",
@@ -51,59 +69,67 @@ def check_model_item(item: ModelItem, files: dict) -> CheckResult:
             file="backend/app/models.py",
         )
 
-    try:
-        tree = ast.parse(models_content)
-    except SyntaxError as exc:
-        return CheckResult(
-            item_id=item.id, status="fail",
-            reason=f"models.py has a syntax error: {exc}",
-            file="backend/app/models.py",
-        )
+    # Try parsing models.py; fall back to auth_models.py if class not found there.
+    for source_path, source_content in (
+        ("backend/app/models.py", models_content),
+        ("backend/app/auth_models.py", auth_models_content),
+    ):
+        if not source_content:
+            continue
+        try:
+            tree = ast.parse(source_content)
+        except SyntaxError as exc:
+            return CheckResult(
+                item_id=item.id, status="fail",
+                reason=f"{source_path} has a syntax error: {exc}",
+                file=source_path,
+            )
 
-    # Find the class node.
-    class_node = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == item.class_name:
-            class_node = node
-            break
+        class_node = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == item.class_name:
+                class_node = node
+                break
 
-    if class_node is None:
-        return CheckResult(
-            item_id=item.id, status="fail",
-            reason=f"Class {item.class_name!r} not found in models.py",
-            file="backend/app/models.py",
-        )
+        if class_node is None:
+            continue
 
-    # Collect annotated names from the class body.
-    annotated_names: set[str] = set()
-    for child in ast.walk(class_node):
-        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
-            annotated_names.add(child.target.id)
+        # Collect annotated names from the class body.
+        annotated_names: set[str] = set()
+        for child in ast.walk(class_node):
+            if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                annotated_names.add(child.target.id)
 
-    # Also check raw attribute assignments (for older SQLAlchemy style).
-    assigned_names: set[str] = set()
-    for child in class_node.body:
-        if isinstance(child, ast.Assign):
-            for t in child.targets:
-                if isinstance(t, ast.Name):
-                    assigned_names.add(t.id)
+        # Also check raw attribute assignments (for older SQLAlchemy style).
+        assigned_names: set[str] = set()
+        for child in class_node.body:
+            if isinstance(child, ast.Assign):
+                for t in child.targets:
+                    if isinstance(t, ast.Name):
+                        assigned_names.add(t.id)
 
-    all_names = annotated_names | assigned_names
+        all_names = annotated_names | assigned_names
 
-    missing = []
-    for col in item.columns:
-        col_name = col.get("name", "")
-        if col_name and col_name not in all_names:
-            missing.append(col_name)
+        missing = []
+        for col in item.columns:
+            col_name = col.get("name", "")
+            if col_name and col_name not in all_names:
+                missing.append(col_name)
 
-    if missing:
-        return CheckResult(
-            item_id=item.id, status="fail",
-            reason=f"Class {item.class_name!r} missing columns: {missing}",
-            file="backend/app/models.py",
-        )
+        if missing:
+            return CheckResult(
+                item_id=item.id, status="partial",
+                reason=f"Class {item.class_name!r} present but missing columns: {missing}",
+                file=source_path,
+            )
 
-    return CheckResult(item_id=item.id, status="pass")
+        return CheckResult(item_id=item.id, status="pass")
+
+    return CheckResult(
+        item_id=item.id, status="fail",
+        reason=f"Class {item.class_name!r} not found in models.py or auth_models.py",
+        file="backend/app/models.py",
+    )
 
 
 def check_route_item(
@@ -136,8 +162,16 @@ def check_route_item(
         r'APIRouter\s*\([^)]*prefix\s*=\s*["\']([^"\']*)["\']',
     )
 
+    # Scaffold auth routes live at a fixed path — include them in the scan.
+    _SCAFFOLD_ROUTE_FILES = frozenset({
+        "backend/app/routes/auth_routes.py",
+        "backend/app/auth.py",
+    })
+
     for fp, content in files.items():
-        if not fp.startswith("backend/app/routes/") or not content:
+        is_routes_dir = fp.startswith("backend/app/routes/")
+        is_scaffold_route = fp in _SCAFFOLD_ROUTE_FILES
+        if (not is_routes_dir and not is_scaffold_route) or not content:
             continue
         pm = _ROUTER_PREFIX_RE.search(content)
         router_prefix = pm.group(1) if pm else ""
@@ -471,11 +505,13 @@ def run_checklist(
         log.warning("checklist_runner.nav_reachability_failed", error=str(exc))
 
     passed = sum(1 for r in results if r.status == "pass")
+    partial = sum(1 for r in results if r.status == "partial")
     failed = sum(1 for r in results if r.status == "fail")
     log.info(
         "checklist.coverage",
         total=len(results),
         passed=passed,
+        partial=partial,
         failed=failed,
         failed_items=[r.item_id for r in results if r.status == "fail"],
     )

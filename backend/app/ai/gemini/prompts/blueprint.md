@@ -53,7 +53,10 @@ Your output must conform exactly to this schema:
   "frontend_pages": [
     {
       "name": "<page name — e.g. Dashboard, Login, TodoDetail>",
+      "component": "<React component name — e.g. DashboardPage>",
       "route": "<React Router path — e.g. /dashboard, /todos/:id>",
+      "auth_required": true,
+      "description": "<one sentence — what a user does on this page>",
       "purpose": "<one sentence — what a user does on this page>",
       "key_components": ["<component name>", "..."]
     }

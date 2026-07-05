@@ -62,9 +62,9 @@ class RequirementsCoordinator:
         self.blueprint = BlueprintAgent()
         self.log = structlog.get_logger("RequirementsCoordinator")
 
-    def analyze(self, raw_input: str) -> StructuredRequirements:
+    def analyze(self, raw_input: str, project_name: str | None = None) -> StructuredRequirements:
         self.log.info("coordinator.analyze.start")
-        sr = self.analyst.analyze(raw_input)
+        sr = self.analyst.analyze(raw_input, project_name=project_name)
         sr = self.validator.validate(sr)
         sr = self.completeness.validate(sr)
         sr = _sanitize_ambiguities(sr)

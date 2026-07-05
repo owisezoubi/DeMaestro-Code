@@ -2223,6 +2223,81 @@ def _inject_missing_fastapi_imports(content: str) -> str:
     return "\n".join(lines)
 
 
+def _fix_duplicate_users_table(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """Remove any rogue `class User(Base)` block from models.py.
+
+    Root cause: a debugger helper (e.g., _fix_missing_admin_endpoint) occasionally
+    injects a `class User(Base)` stub into models.py when it can't resolve the
+    model name, but `User` is already defined in auth_models.py (scaffold).  Both
+    classes register `__tablename__ = "users"` with the same Base.metadata, which
+    SQLAlchemy rejects at import time with:
+
+        sqlalchemy.exc.InvalidRequestError:
+            Table 'users' is already defined for this MetaData instance.
+
+    Fix (idempotent):
+      1. Strip any `class User(Base): ...` block from models.py.
+      2. Ensure the canonical re-export line is present.
+    """
+    _log = structlog.get_logger("debugger")
+
+    err_blob = " ".join(str(e) for e in (test_results.get("errors") or []))
+    logs = test_results.get("logs") or {}
+    log_blob = " ".join(logs.get(k, "") for k in ("boot", "typecheck", "install"))
+    haystack = (err_blob + " " + log_blob).lower()
+
+    triggered = (
+        "table 'users' is already defined" in haystack
+        or "table users is already defined" in haystack
+        or "is already defined for this metadata" in haystack
+    )
+    if not triggered:
+        return {}
+
+    models_path = "backend/app/models.py"
+    content = generated_files.get(models_path, "")
+    if not content:
+        return {}
+
+    # Strip any `class User(...)` block — match from the class line through
+    # the next top-level (non-indented) statement or end of file.
+    lines = content.split("\n")
+    new_lines: list[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.lstrip()
+        if not skipping and re.match(r"class\s+User\s*\(.*\)\s*:", stripped):
+            skipping = True
+            _log.info(
+                "fix_duplicate_users_table.removed_class",
+                path=models_path,
+                line_preview=line[:80],
+            )
+            continue
+        if skipping:
+            # A non-empty, non-indented line ends the class body.
+            if line and not line[0].isspace():
+                skipping = False
+                new_lines.append(line)
+            continue
+        new_lines.append(line)
+
+    new_content = "\n".join(new_lines)
+
+    # Ensure the canonical re-export is present (idempotent).
+    reexport = "from app.auth_models import User  # noqa: F401"
+    if reexport not in new_content:
+        new_content = reexport + "\n" + new_content
+
+    if new_content == content:
+        return {}
+
+    _log.info("fix_duplicate_users_table.applied", path=models_path)
+    return {models_path: new_content}
+
+
 def _fix_missing_admin_endpoint(test_results: dict, generated_files: dict) -> dict:
     """Inject stub route handlers for /api/admin/* endpoints absent from the backend.
 
@@ -2273,38 +2348,57 @@ def _fix_missing_admin_endpoint(test_results: dict, generated_files: dict) -> di
                     )
                 model = resolved
             else:
-                updated_models = _ensure_model_file_imports(models_content)
-                updated_models = updated_models.rstrip() + _build_model_stub(model)
-                # Validate the stub: parse the file and confirm the class is
-                # at module level. A bad injection (indented under another
-                # class or inside an if-block) would produce a name that
-                # mypy can't find on the module.
-                try:
-                    tree = ast.parse(updated_models)
-                    # ast.walk doesn't give parent, so check directly on module body.
-                    module_top_classes = {
-                        node.name
-                        for node in tree.body
-                        if isinstance(node, ast.ClassDef)
-                    }
-                    if model not in module_top_classes:
-                        _log.error(
-                            "fix_missing_admin_endpoint.stub_injection_failed",
-                            model=model,
-                            reason="class not at module level after injection",
-                            top_level_classes=sorted(module_top_classes),
-                        )
-                    else:
-                        fixes[models_path] = updated_models
-                        _log.info(
-                            "fix_missing_admin_endpoint.created_model_stub",
-                            model=model, path=models_path,
-                        )
-                except SyntaxError as se:
-                    _log.error(
-                        "fix_missing_admin_endpoint.stub_syntax_error",
-                        model=model, error=str(se),
+                # Models owned by the scaffold (auth_models.py) must never be
+                # re-stubbed here. A second `class User(Base)` binding the same
+                # __tablename__ = "users" crashes SQLAlchemy at import time with
+                # "Table 'users' is already defined for this MetaData".
+                _SCAFFOLD_MODEL_NAMES = frozenset({"User"})
+                if model in _SCAFFOLD_MODEL_NAMES:
+                    _log.info(
+                        "fix_missing_admin_endpoint.skipped_scaffold_model",
+                        model=model,
+                        reason="scaffold owns this model — ensuring re-export instead of stubbing",
                     )
+                    reexport = "from app.auth_models import User  # noqa: F401\n"
+                    if reexport.strip() not in models_content:
+                        fixes[models_path] = reexport + models_content
+                        _log.info(
+                            "fix_missing_admin_endpoint.re_exported_scaffold_user",
+                            path=models_path,
+                        )
+                else:
+                    updated_models = _ensure_model_file_imports(models_content)
+                    updated_models = updated_models.rstrip() + _build_model_stub(model)
+                    # Validate the stub: parse the file and confirm the class is
+                    # at module level. A bad injection (indented under another
+                    # class or inside an if-block) would produce a name that
+                    # mypy can't find on the module.
+                    try:
+                        tree = ast.parse(updated_models)
+                        # ast.walk doesn't give parent, so check directly on module body.
+                        module_top_classes = {
+                            node.name
+                            for node in tree.body
+                            if isinstance(node, ast.ClassDef)
+                        }
+                        if model not in module_top_classes:
+                            _log.error(
+                                "fix_missing_admin_endpoint.stub_injection_failed",
+                                model=model,
+                                reason="class not at module level after injection",
+                                top_level_classes=sorted(module_top_classes),
+                            )
+                        else:
+                            fixes[models_path] = updated_models
+                            _log.info(
+                                "fix_missing_admin_endpoint.created_model_stub",
+                                model=model, path=models_path,
+                            )
+                    except SyntaxError as se:
+                        _log.error(
+                            "fix_missing_admin_endpoint.stub_syntax_error",
+                            model=model, error=str(se),
+                        )
 
         # ── Get / create target route file ────────────────────────────────
         existing_content = fixes.get(target_path, generated_files.get(target_path, ""))
@@ -3658,55 +3752,132 @@ def _detect_duplicate_top_level_decls(content: str) -> list:
 
 # ── Unwrapped context-provider fixer ────────────────────────────────────────
 
+# Matches lowercase icon prop names rendered as JSX child: >{icon}< or >{leadingIcon}<
 _ICON_RENDER_AS_CHILD_RE = re.compile(
     r"(?P<lead>>\s*\{)\s*(?P<name>icon|Icon|leadingIcon|trailingIcon)\s*\}",
 )
 
-_TARGET_ICON_PATHS = (
-    "frontend/src/components/ui/empty-state.jsx",
-    "frontend/src/components/ui/empty-state.tsx",
-    "frontend/src/components/ui/hero.jsx",
-    "frontend/src/components/ui/feature-card.jsx",
+# Matches uppercase component names rendered as JSX child text: >{SomeIcon}<
+# These should be rendered as <SomeIcon /> instead.
+_ICON_AS_CHILD_RE = re.compile(
+    r">\s*\{\s*([A-Z][a-zA-Z0-9]*)\s*\}\s*<",
+)
+
+# Matches object.icon rendered as JSX child: >{item.icon}< or >{nav.icon}<
+_ICON_PROP_AS_CHILD_RE = re.compile(
+    r">\s*\{\s*(\w+)\.icon\s*\}\s*<",
 )
 
 
 def _fix_component_rendered_as_child(
     test_results: dict, generated_files: dict,
 ) -> dict:
-    """Rewrite `{icon}` / `{Icon}` rendered as a JSX child to an IIFE component call.
+    """Rewrite component references rendered as JSX text children.
 
-    An icon prop that holds a React component reference crashes at runtime with
-    "Objects are not valid as a React child" when rendered as `{icon}` instead
-    of `<Icon />`. This fixer wraps the expression so it renders correctly.
+    Catches three patterns:
+    1. {icon} / {leadingIcon} — lowercase prop holding a component ref
+       → IIFE wrapper so it renders correctly regardless of component type
+    2. {SomeComponent} — uppercase identifier used as text child
+       → <SomeComponent />
+    3. {obj.icon} — object property rendered as text child
+       → IIFE wrapper
+
+    All three cause "Objects are not valid as a React child" at runtime.
+    Scans all frontend .jsx/.tsx files (not just ui/ components).
     """
     _log = structlog.get_logger("debugger")
     fixes: dict[str, str] = {}
 
-    for path in _TARGET_ICON_PATHS:
-        content = generated_files.get(path)
-        if not content or "icon" not in content:
+    for path, content in generated_files.items():
+        if not (path.startswith("frontend/src/") and path.endswith((".jsx", ".tsx"))):
             continue
-        if re.search(r"const\s+(Icon|IconComp)\s*=\s*(icon|Icon)", content):
-            continue  # already rewritten correctly
+        if not content:
+            continue
 
-        changed = False
+        new_content = content
 
-        def _rewrite(m, _c=None):
-            nonlocal changed
-            lead = m.group("lead")
-            name = m.group("name")
-            changed = True
-            return (
-                f"{lead}(() => {{ const __C = {name}; "
-                f"return __C ? <__C /> : null; }})()"
-                f"}}"
-            )
+        # Pattern 1 — lowercase icon prop as child (IIFE wrap)
+        if re.search(r"\b(icon|leadingIcon|trailingIcon)\b", new_content):
+            if not re.search(r"const\s+(Icon|IconComp)\s*=\s*(icon|Icon)", new_content):
+                changed_p1 = False
 
-        new_content = _ICON_RENDER_AS_CHILD_RE.sub(_rewrite, content)
+                def _rewrite_lc(m, _c=None):
+                    nonlocal changed_p1
+                    lead = m.group("lead")
+                    name = m.group("name")
+                    changed_p1 = True
+                    return (
+                        f"{lead}(() => {{ const __C = {name}; "
+                        f"return __C ? <__C /> : null; }})()"
+                        f"}}"
+                    )
 
-        if changed and new_content != content:
+                new_content = _ICON_RENDER_AS_CHILD_RE.sub(_rewrite_lc, new_content)
+
+        # Pattern 2 — uppercase component name as text child → <Name />
+        new_content = _ICON_AS_CHILD_RE.sub(r"><\1 /><", new_content)
+
+        # Pattern 3 — obj.icon as text child (IIFE wrap)
+        def _rewrite_prop(m):
+            expr = m.group(0)[1:-1].strip()  # strip leading > and trailing <
+            inner = expr[1:-1].strip()        # strip { and }
+            return f"><(() => {{ const __C = {inner}; return __C ? <__C /> : null; }})())<"
+
+        new_content = _ICON_PROP_AS_CHILD_RE.sub(_rewrite_prop, new_content)
+
+        if new_content != content:
             fixes[path] = new_content
             _log.info("fix_component_rendered_as_child.applied", path=path)
+
+    return fixes
+
+
+def _fix_query_double_unwrap(
+    test_results: dict, generated_files: dict,
+) -> dict:
+    """Rewrite the two LLM anti-patterns that produce 'data is undefined' in
+    TanStack useQuery hooks.
+
+    Pattern A — Axios direct with .then unwrap:
+        queryFn: () => api.get('/x').then((r) => r.data)
+
+    Pattern B — Async with intermediate variable:
+        const r = await api.get('/x'); return r.data
+
+    Fix: the api helper already returns the parsed body directly. Drop the extra
+    unwrap layer.
+
+    Only touches files that already import useQuery from @tanstack/react-query.
+    """
+    _log = structlog.get_logger("debugger")
+    fixes: dict = {}
+
+    for fp, content in generated_files.items():
+        if not (fp.startswith("frontend/src/") and fp.endswith((".jsx", ".tsx"))):
+            continue
+        if "useQuery" not in content or "@tanstack/react-query" not in content:
+            continue
+
+        new_content = content
+
+        # Pattern A — .then((r) => r.data) appended to api.get(...)
+        new_content = re.sub(
+            r"(api\.get\(\s*['\"][^'\"]+['\"]\s*\))"
+            r"\.then\(\s*\([^)]*\)\s*=>\s*[a-zA-Z_$][\w$]*\.data\s*\)",
+            r"\1",
+            new_content,
+        )
+
+        # Pattern B — const r = await api.get(...); return r.data
+        new_content = re.sub(
+            r"const\s+([a-zA-Z_$][\w$]*)\s*=\s*await\s+(api\.get\(\s*['\"][^'\"]+['\"]\s*\))\s*;\s*return\s+\1\.data",
+            r"return await \2",
+            new_content,
+        )
+
+        if new_content != content:
+            fixes[fp] = new_content
+            _log.info("fix_query_double_unwrap.rewrote", file=fp)
 
     return fixes
 
@@ -4936,9 +5107,13 @@ def _rebuild_navbar_scaffold(content: str) -> str:
 def _infer_show_in_nav(path: str) -> bool:
     """True if this route should appear in the navbar by default.
 
-    Hidden: admin pages, :id / {id} detail routes, sub-action paths
-    (new/edit/create/add), and OAuth callback pages.
+    Hidden: wildcard/catch-all, admin pages, :id / {id} detail routes,
+    sub-action paths (new/edit/create/add), and OAuth callback pages.
     """
+    # Wildcard catch-all is the NotFound page — never shown in nav and would
+    # also trigger a ping-pong with _strip_notfound_from_navbar.
+    if path.strip() in ("*", "/*"):
+        return False
     segs = [s for s in path.strip("/").split("/") if s]
     if not segs:
         return True  # root "/"
@@ -5397,6 +5572,8 @@ def _fix_routes_config_consistency(test_results: dict, generated_files: dict) ->
     if missing:
         new_entry_strs: list[str] = []
         for pv, comp in missing:
+            if pv.strip() in ("*", "/*"):
+                continue  # catch-all never belongs in routes.js config
             requires = _infer_route_requires(pv)
             label = _infer_route_label(comp)
             show_in_nav = _infer_show_in_nav(pv) and requires != "admin"
@@ -6835,6 +7012,285 @@ def _fix_remove_orphan_navbar_links(
     return fixes
 
 
+def _stub_missing_pages_for_orphan_links(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """For every ORPHAN-LINK <Link to='/X'> whose target /X has no
+    matching <Route> in App.jsx AND no matching page component on disk,
+    create a minimal placeholder page file so the Link is not dead.
+
+    Why this exists:
+      The LLM frequently writes <Link to='/projects'> in DashboardPage
+      without generating ProjectsPage.jsx OR mounting the route.  Without
+      a page file there is nothing for _fix_mount_missing_routes_for_existing_pages
+      to mount, so the orphan-link error never clears.  Generating a small
+      'Coming soon' stub is a graceful degradation that lets the app ship
+      and the user iterate later.
+
+    Strategy:
+      1. Read route_link_violations from test_results.
+      2. Skip targets that ARE already mounted in App.jsx OR already
+         have a matching page file (handled by the existing helper).
+      3. For each remaining slug, generate a stub page at
+         frontend/src/pages/<Slug>Page.jsx with a centered placeholder.
+      4. Run AFTER any existing helper that creates page files, but BEFORE
+         _fix_mount_missing_routes_for_existing_pages so the route-mounter
+         can then pick the stub up and mount it.
+    """
+    _log = structlog.get_logger("debugger")
+
+    violations = test_results.get("route_link_violations", []) or []
+    if not violations:
+        return {}
+
+    app_jsx = generated_files.get("frontend/src/App.jsx", "")
+    if not app_jsx:
+        return {}
+
+    mounted_paths = set(re.findall(
+        r'<Route\s+[^>]*path\s*=\s*["\']([^"\']+)["\']',
+        app_jsx,
+    ))
+
+    existing_page_files = {
+        fp.split("/")[-1]
+        for fp in generated_files
+        if fp.startswith("frontend/src/pages/")
+        and fp.endswith((".jsx", ".tsx"))
+    }
+
+    fixes: dict = {}
+    seen_slugs: set = set()
+
+    for v in violations:
+        if v.get("kind") not in ("Link", "navigate"):
+            continue
+        target = (v.get("target") or "").strip()
+        if not target.startswith("/"):
+            continue
+        if target in mounted_paths:
+            continue
+
+        slug = target.strip("/").split("/")[0]
+        if not slug or slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+
+        # If the existing helper can mount it, skip (we don't stub on top of real pages).
+        candidates = {
+            f"{slug.title()}Page.jsx",
+            f"{slug.capitalize()}Page.jsx",
+            f"{slug.title()}.jsx",
+            f"{slug.capitalize()}.jsx",
+        }
+        if candidates & existing_page_files:
+            continue
+
+        # Build the stub component
+        comp_name = f"{slug.title().replace('-', '').replace('_', '')}Page"
+        stub_path = f"frontend/src/pages/{comp_name}.jsx"
+        if stub_path in fixes or stub_path in generated_files:
+            continue
+
+        pretty_title = slug.replace('-', ' ').replace('_', ' ').title()
+        stub = (
+            f'import {{ Construction }} from "lucide-react"\n\n'
+            f'export default function {comp_name}() {{\n'
+            f'  return (\n'
+            f'    <section className="max-w-3xl mx-auto px-4 py-16 text-center">\n'
+            f'      <div className="inline-flex items-center justify-center w-16 h-16\n'
+            f'                      rounded-2xl bg-amber-100 text-amber-600 mb-4">\n'
+            f'        <Construction className="w-8 h-8" />\n'
+            f'      </div>\n'
+            f'      <h1 className="text-3xl font-bold mb-2">{pretty_title}</h1>\n'
+            f'      <p className="text-slate-500">\n'
+            f'        This page is coming soon. Linked from elsewhere in the app\n'
+            f'        but has not been built out yet.\n'
+            f'      </p>\n'
+            f'    </section>\n'
+            f'  )\n'
+            f'}}\n'
+        )
+        fixes[stub_path] = stub
+        _log.info(
+            "stub_missing_pages_for_orphan_links.created",
+            target=target,
+            page=stub_path,
+        )
+
+    return fixes
+
+
+def _fix_mount_missing_routes_for_existing_pages(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """For every ORPHAN-LINK (<Link to='/X'>) whose target /X has no matching
+    <Route> in App.jsx, look for a matching page component in
+    frontend/src/pages/.  If found, INJECT the missing route + import into
+    App.jsx instead of rewriting the link or deleting it.
+
+    Why this exists:
+      * `_fix_orphan_navigates_to_existing_routes` only REWRITES the link
+        to an existing route.
+      * `_fix_routes_config_consistency` only mounts routes that are listed
+        in routes.js.
+      * Neither handles the common LLM bug where DashboardPage renders
+        `<Link to='/projects'>` but the LLM forgot to add the
+        `<Route path='/projects'>` to App.jsx, even though
+        `ProjectsPage.jsx` already exists in pages/.
+
+    Strategy:
+      1. Read every ORPHAN-LINK target from test_results["route_link_violations"].
+      2. Skip targets that ARE already mounted in App.jsx.
+      3. For each remaining target, scan frontend/src/pages/ for a page file
+         whose slug matches the target ('/projects' → ProjectsPage.jsx,
+         Projects.jsx, ProjectsList.jsx, etc.).
+      4. If found, insert a new `<Route path="/X" element={<PageComp />} />`
+         line + the corresponding import. Wrap in RequireAuth IF auth scaffold
+         exists AND a peer route uses RequireAuth (proxy for "this app
+         requires login").
+
+    Returns {path: new_content} for App.jsx when injections happened.
+    Idempotent — safe to run every cycle.
+    """
+    _log = structlog.get_logger("debugger")
+
+    violations = test_results.get("route_link_violations", []) or []
+    if not violations:
+        return {}
+
+    app_jsx_path = "frontend/src/App.jsx"
+    app_jsx = generated_files.get(app_jsx_path, "")
+    if not app_jsx:
+        return {}
+
+    # Existing mounted paths
+    mounted_paths: set[str] = set(re.findall(
+        r'<Route\s+[^>]*path\s*=\s*["\']([^"\']+)["\']',
+        app_jsx,
+    ))
+
+    # Collect orphan link targets (skip non-Link kinds and external/anchor)
+    orphan_targets: list[str] = []
+    seen: set[str] = set()
+    for v in violations:
+        if v.get("kind") not in ("Link", "navigate"):
+            continue
+        target = (v.get("target") or "").strip()
+        if not target or not target.startswith("/"):
+            continue
+        if target in mounted_paths or target in seen:
+            continue
+        seen.add(target)
+        orphan_targets.append(target)
+
+    if not orphan_targets:
+        return {}
+
+    # Index existing page files for quick lookup
+    page_files = {
+        fp.split("/")[-1]: fp
+        for fp in generated_files
+        if fp.startswith("frontend/src/pages/")
+        and fp.endswith((".jsx", ".tsx"))
+    }
+
+    def _find_page_for(target: str) -> tuple[str, str] | None:
+        """Return (component_name, page_filename) for a target path, or None."""
+        slug = target.strip("/").split("/")[0]
+        if not slug:
+            return None
+        # Normalise candidates: CamelCase, slug-as-is, PascalPage forms.
+        bare = re.sub(r"[-_]", "", slug).lower()
+        candidates = [
+            f"{slug.title()}Page.jsx",
+            f"{slug.capitalize()}Page.jsx",
+            f"{slug.title()}.jsx",
+            f"{slug.capitalize()}.jsx",
+        ]
+        for cand in candidates:
+            if cand in page_files:
+                comp = cand[:-4]  # strip .jsx
+                return (comp, page_files[cand])
+        # Fuzzy: scan for a file whose basename (without .jsx/Page) matches.
+        for filename in page_files:
+            base = filename[:-4]
+            base_norm = re.sub(r"(Page|Screen|View)$", "", base).lower()
+            if base_norm == bare:
+                return (base, page_files[filename])
+        return None
+
+    # Detect auth scaffold + whether peer routes use RequireAuth
+    auth_scaffold_present = (
+        "RequireAuth" in app_jsx
+        or "frontend/src/components/RequireAuth.jsx" in generated_files
+    )
+    has_require_auth_routes = "<RequireAuth>" in app_jsx
+
+    additions: list[tuple[str, str, str]] = []  # (path, component, page_filename)
+    for target in orphan_targets:
+        found = _find_page_for(target)
+        if not found:
+            continue
+        additions.append((target, found[0], found[1]))
+
+    if not additions:
+        return {}
+
+    new_app = app_jsx
+
+    # 1. Inject imports for any component not already imported.
+    for _path, comp, _filename in additions:
+        if re.search(rf'\bimport\s+{comp}\b', new_app):
+            continue
+        import_line = f'import {comp} from "@/pages/{comp}"'
+        # Insert after the last existing import line.
+        last_import = None
+        for m in re.finditer(r"^import\s+[^\n]+$", new_app, re.MULTILINE):
+            last_import = m
+        if last_import:
+            new_app = (
+                new_app[: last_import.end()]
+                + "\n" + import_line
+                + new_app[last_import.end():]
+            )
+        else:
+            new_app = import_line + "\n" + new_app
+
+    # 2. Inject <Route> entries before the closing </Routes>.
+    # Try to insert just before </Routes> so they land in the same Router scope.
+    routes_close = re.search(r"</Routes>", new_app)
+    if not routes_close:
+        # No <Routes> wrapper — abort to avoid breaking the file.
+        _log.warning("fix_mount_missing_routes.no_routes_tag")
+        return {}
+
+    insert_at = routes_close.start()
+    indent = "        "  # match common 2-deep nesting; harmless if it differs
+
+    new_route_lines: list[str] = []
+    for path_val, comp, _filename in additions:
+        if auth_scaffold_present and has_require_auth_routes:
+            line = (
+                f'{indent}<Route path="{path_val}" element='
+                f'{{<RequireAuth><{comp} /></RequireAuth>}} />\n'
+            )
+        else:
+            line = f'{indent}<Route path="{path_val}" element={{<{comp} />}} />\n'
+        new_route_lines.append(line)
+        _log.info(
+            "fix_mount_missing_routes.injected",
+            path=path_val, component=comp,
+        )
+
+    new_app = new_app[:insert_at] + "".join(new_route_lines) + new_app[insert_at:]
+
+    if new_app == app_jsx:
+        return {}
+
+    return {app_jsx_path: new_app}
+
+
 # ── Duplicate top-level declaration cleaner ──────────────────────────────────
 
 _DEDUP_FUNC_RE = re.compile(
@@ -7399,8 +7855,23 @@ def _auto_stub_missing_contract_endpoints(
         # Append the stub if the decorator isn't already present.
         deco_line = f'@router.{method}("{handler_path if handler_path else "/"}")'
         if deco_line not in current:
-            current = current.rstrip() + "\n\n\n" + stub + "\n"
-            current = _ensure_required_imports(current)
+            candidate = current.rstrip() + "\n\n\n" + stub + "\n"
+            candidate = _ensure_required_imports(candidate)
+            # Validate before persisting — a malformed stub template must not
+            # be written to generated_files and cause a boot failure next cycle.
+            if target.endswith(".py"):
+                try:
+                    ast.parse(candidate)
+                except SyntaxError as _syn:
+                    _log.error(
+                        "auto_stub.syntax_check_failed",
+                        file=target,
+                        endpoint=f"{ep['method']} {ep['path']}",
+                        error=str(_syn)[:200],
+                        preview=candidate[:400],
+                    )
+                    continue
+            current = candidate
             fixes[target] = current
             _log.info(
                 "auto_stub.added_endpoint",
@@ -7607,6 +8078,472 @@ def _normalize_sqlalchemy_models(
     return {mypy_ini_path: new_ini}
 
 
+def _normalize_accent_css_var(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """Rewrite any --color-primary / --primary / --brand override in
+    frontend/src/index.css to --accent, and coerce hex/rgb() values to
+    'R G B' triplets so Tailwind alpha syntax works.
+
+    Idempotent.
+    """
+    css_path = "frontend/src/index.css"
+    css = generated_files.get(css_path, "")
+    if not css:
+        return {}
+
+    synonyms = ("--color-primary", "--primary", "--brand",
+                "--brand-color", "--theme-color", "--accent-color")
+    changed = False
+    new_css = css
+
+    # 1) Synonym → --accent
+    for syn in synonyms:
+        if syn in new_css:
+            new_css = re.sub(
+                rf"{re.escape(syn)}\s*:\s*([^;]+);",
+                r"--accent: \1;",
+                new_css,
+            )
+            changed = True
+
+    # 2) Coerce hex / rgb() inside any --accent declaration
+    def nonlocal_changed_flag():
+        nonlocal changed
+        changed = True
+
+    def _coerce(match: re.Match) -> str:
+        var_name = match.group(1)
+        val = match.group(2).strip()
+        # Already a triplet?
+        if re.fullmatch(r"\d{1,3}\s+\d{1,3}\s+\d{1,3}", val):
+            return match.group(0)
+        # Hex
+        m = re.fullmatch(r"#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})", val)
+        if m:
+            h = m.group(1)
+            if len(h) == 3:
+                h = "".join(c * 2 for c in h)
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            nonlocal_changed_flag()
+            return f"{var_name}: {r} {g} {b};"
+        # rgb(...)
+        m = re.fullmatch(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)[^)]*\)", val)
+        if m:
+            nonlocal_changed_flag()
+            return f"{var_name}: {int(m.group(1))} {int(m.group(2))} {int(m.group(3))};"
+        return match.group(0)
+
+    new_css = re.sub(
+        r"(--accent(?:-fg)?)\s*:\s*([^;]+);",
+        _coerce,
+        new_css,
+    )
+
+    if not changed or new_css == css:
+        return {}
+    return {css_path: new_css}
+
+
+def _strip_notfound_from_navbar(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """Remove any routes.js entry whose path is '*' or whose component
+    is NotFoundPage, AND any hardcoded <Link to='*'> / <Link to='/404'>
+    in Navbar.jsx. The catch-all should never be a navbar item.
+
+    Idempotent.
+    """
+    fixes: dict = {}
+
+    routes_path = "frontend/src/lib/routes.js"
+    routes_js = generated_files.get(routes_path, "")
+    if routes_js:
+        original = routes_js
+        # Strip object literals that mention path: "*" OR a NotFound* label/icon
+        routes_js = re.sub(
+            r"\{\s*[^{}]*?path\s*:\s*['\"]\*['\"][^{}]*?\}\s*,?",
+            "",
+            routes_js,
+        )
+        routes_js = re.sub(
+            r"\{\s*[^{}]*?label\s*:\s*['\"](?:Not\s*Found|404)['\"][^{}]*?\}\s*,?",
+            "",
+            routes_js,
+        )
+        # Clean up double commas / trailing commas from the array.
+        routes_js = re.sub(r",\s*,", ",", routes_js)
+        routes_js = re.sub(r"\[\s*,", "[", routes_js)
+        routes_js = re.sub(r",\s*\]", "]", routes_js)
+        if routes_js != original:
+            fixes[routes_path] = routes_js
+
+    nav_path = "frontend/src/components/Navbar.jsx"
+    navbar = generated_files.get(nav_path, "")
+    if navbar:
+        original = navbar
+        # Strip <Link to="*"> ... </Link> and <Link to="/404"> variants.
+        navbar = re.sub(
+            r'<Link[^>]*to\s*=\s*["\'](?:\*|/404|/not-found)["\'][^>]*>.*?</Link>',
+            "",
+            navbar,
+            flags=re.DOTALL,
+        )
+        navbar = re.sub(r"\n{3,}", "\n\n", navbar)
+        if navbar != original:
+            fixes[nav_path] = navbar
+
+    return fixes
+
+
+def _normalize_user_fk_types(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """Coerce any FK column referencing users.id to use String (VARCHAR).
+
+    The scaffold's User.id is a plain String column (UUID hex stored as text).
+    On Postgres, an FK whose column type is Integer/UUID/anything-other-than-
+    String triggers:
+
+        foreign key constraint cannot be implemented
+        Key columns are of incompatible types: X and character varying.
+
+    SQLite is permissive about this and lets it slide, so the failure only
+    surfaces in production on Neon. This helper rewrites FK columns to use
+    String when the referenced column is users.id.
+
+    Patterns rewritten (covers SQLAlchemy 1.x Column and 2.0 mapped_column):
+      Column(Integer, ForeignKey("users.id"))          -> Column(String, ForeignKey("users.id"))
+      Column(UUID, ForeignKey("users.id"))             -> Column(String, ForeignKey("users.id"))
+      Column(GUID(), ForeignKey("users.id"))           -> Column(String, ForeignKey("users.id"))
+      mapped_column(Integer, ForeignKey("users.id"))   -> mapped_column(String, ForeignKey("users.id"))
+      Mapped[int] = mapped_column(..., FK("users.id")) -> Mapped[str] = mapped_column(String, FK(...))
+
+    Idempotent — does nothing when columns already use String.
+    """
+    _log = structlog.get_logger("debugger")
+    out: dict = {}
+
+    # Wrong types we know about. Order matters — GUID() must be matched before
+    # we'd try to match bare GUID.
+    wrong_type_pattern = re.compile(
+        r"\b(?:Integer|BigInteger|SmallInteger|UUID|GUID\(\)|PG_UUID|"
+        r"PG_UUID\(as_uuid=False\)|PG_UUID\(as_uuid=True\)|UUID\(as_uuid=False\)|"
+        r"UUID\(as_uuid=True\))\b"
+    )
+
+    fk_users_id = re.compile(
+        r"""(Column|mapped_column)\s*\(\s*([^,)]+?)\s*,\s*ForeignKey\(\s*["']users\.id["']""",
+        re.MULTILINE,
+    )
+
+    for path, content in list(generated_files.items()):
+        # Only touch python model files.
+        if not path.endswith(".py"):
+            continue
+        if "ForeignKey" not in content or "users.id" not in content:
+            continue
+        # Don't touch the scaffold itself.
+        if path.endswith("auth_models.py"):
+            continue
+
+        new_content = content
+        changed = False
+
+        # Pass 1: rewrite the type slot inside Column(...) / mapped_column(...)
+        def _swap(m: re.Match) -> str:
+            nonlocal changed
+            ctor, type_expr = m.group(1), m.group(2).strip()
+            if type_expr == "String":
+                return m.group(0)  # already correct
+            if not wrong_type_pattern.search(type_expr):
+                # Type is something else (Text, custom) — leave it alone.
+                return m.group(0)
+            changed = True
+            return f'{ctor}(String, ForeignKey("users.id"'
+
+        new_content = fk_users_id.sub(_swap, new_content)
+
+        # Pass 2: fix Mapped[int] annotations that pair with the rewritten FK.
+        # Heuristic: lines that contain mapped_column(String, ForeignKey("users.id"))
+        # but were typed Mapped[int] / Mapped[uuid.UUID].
+        new_lines = []
+        for line in new_content.split("\n"):
+            if (
+                'ForeignKey("users.id")' in line
+                and "mapped_column(String" in line
+                and ("Mapped[int]" in line or "Mapped[uuid.UUID]" in line)
+            ):
+                line = line.replace("Mapped[int]", "Mapped[str]").replace(
+                    "Mapped[uuid.UUID]", "Mapped[str]"
+                )
+                changed = True
+            new_lines.append(line)
+        new_content = "\n".join(new_lines)
+
+        if changed and new_content != content:
+            out[path] = new_content
+            _log.info(
+                "normalize_user_fk_types.rewrote",
+                path=path,
+                before_sample=content[: min(len(content), 500)][-200:],
+            )
+
+    return out
+
+
+def _fix_missing_post_auth_navigate(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """Ensure LoginPage / RegisterPage navigate after a successful auth call.
+
+    The bug we are preventing: the LLM generates a LoginPage that
+    correctly calls `await login({email, password})` (which sets the
+    AuthContext user and stores the JWT), but then forgets to call
+    `navigate('/dashboard')` afterwards. The user authenticates
+    successfully but the page never redirects, so they sit on /login
+    indefinitely with a populated session.
+
+    What we do:
+      1. Find every frontend page file that calls `await login(...)` or
+         `await register(...)` from useAuth.
+      2. Detect whether a navigate(...) call follows the await on the
+         success path.
+      3. If not, inject `navigate("/dashboard", { replace: true })`
+         (LoginPage → /dashboard) or the auth landing route resolved
+         from App.jsx route declarations.
+      4. Ensure `useNavigate` is imported and `const navigate = useNavigate()`
+         is declared.
+
+    Idempotent — runs every cycle and is a no-op once the file looks
+    correct.
+    """
+    _log = structlog.get_logger("debugger")
+    fixes: dict = {}
+
+    # Resolve the preferred post-auth target by inspecting App.jsx.
+    app_jsx = generated_files.get("frontend/src/App.jsx", "")
+    mounted = set(re.findall(
+        r'<Route\s+[^>]*path\s*=\s*["\']([^"\']+)["\']', app_jsx
+    ))
+
+    def _login_target() -> str:
+        for cand in ("/dashboard", "/home", "/app", "/account", "/profile"):
+            if cand in mounted:
+                return cand
+        # Pick the first non-auth, non-public route as a last resort.
+        for p in mounted:
+            if p in ("/", "/login", "/register", "/forgot-password", "*"):
+                continue
+            return p
+        return "/"
+
+    target = _login_target()
+
+    # Pages we care about: LoginPage, RegisterPage, plus any file whose
+    # body invokes await login({...}) / await register({...}) from useAuth.
+    candidate_paths: list[str] = []
+    for fp, content in generated_files.items():
+        if not (fp.startswith("frontend/src/pages/") and fp.endswith((".jsx", ".tsx"))):
+            continue
+        base = fp.split("/")[-1]
+        is_named_auth_page = base in (
+            "LoginPage.jsx", "RegisterPage.jsx",
+            "Login.jsx", "Register.jsx",
+            "SignupPage.jsx", "SignUpPage.jsx",
+        )
+        calls_auth = bool(
+            re.search(r"await\s+(?:login|register)\s*\(", content)
+            and "useAuth" in content
+        )
+        if is_named_auth_page or calls_auth:
+            candidate_paths.append(fp)
+
+    if not candidate_paths:
+        return {}
+
+    for fp in candidate_paths:
+        content = generated_files[fp]
+        new_content = content
+
+        # If there's already a navigate() call AFTER an await login/register
+        # in the same function body, skip. Heuristic: look for the call
+        # followed within ~400 chars by `navigate(` or `window.location`.
+        already_navigates = bool(re.search(
+            r"await\s+(?:login|register)\s*\([^)]*\)\s*;?\s*"
+            r"(?:\}?\s*catch[^{]*\{[^}]*\}\s*)?"
+            r".{0,400}?(?:navigate\s*\(|window\.location)",
+            new_content,
+            flags=re.DOTALL,
+        ))
+        if already_navigates:
+            continue
+
+        # Inject navigate("/dashboard", { replace: true }) after the await.
+        # We only mutate the first matching await per file to avoid
+        # double-injecting in pages that handle both login and register.
+        injection_done = False
+
+        def _inject(m: re.Match) -> str:
+            nonlocal injection_done
+            if injection_done:
+                return m.group(0)
+            injection_done = True
+            base_call = m.group(0).rstrip(";").rstrip()
+            return (
+                f'{base_call};\n      '
+                f'navigate("{target}", {{ replace: true }});'
+            )
+
+        new_content = re.sub(
+            r"await\s+(?:login|register)\s*\([^)]*\)\s*;?",
+            _inject,
+            new_content,
+            count=1,
+        )
+
+        if not injection_done:
+            continue
+
+        # Ensure useNavigate is imported from react-router-dom.
+        if "useNavigate" not in new_content:
+            # Try to extend an existing react-router-dom import.
+            rrd_import = re.search(
+                r'import\s*\{\s*([^}]*?)\}\s*from\s*["\']react-router-dom["\']',
+                new_content,
+            )
+            if rrd_import:
+                names = [n.strip() for n in rrd_import.group(1).split(",") if n.strip()]
+                if "useNavigate" not in names:
+                    names.append("useNavigate")
+                    new_import = (
+                        'import { '
+                        + ", ".join(sorted(set(names)))
+                        + ' } from "react-router-dom"'
+                    )
+                    new_content = (
+                        new_content[: rrd_import.start()]
+                        + new_import
+                        + new_content[rrd_import.end():]
+                    )
+            else:
+                # Add a fresh import line near the other imports.
+                new_content = (
+                    'import { useNavigate } from "react-router-dom"\n'
+                    + new_content
+                )
+
+        # Ensure `const navigate = useNavigate()` is declared somewhere
+        # before the await call. Inject right after the default export
+        # function signature or after the useAuth() call.
+        if "useNavigate()" not in new_content:
+            # Prefer placing it next to the useAuth() destructure.
+            ua = re.search(
+                r"(const\s*\{[^}]*\}\s*=\s*useAuth\s*\(\s*\)\s*;?)",
+                new_content,
+            )
+            if ua:
+                new_content = new_content.replace(
+                    ua.group(1),
+                    ua.group(1) + "\n  const navigate = useNavigate();",
+                    1,
+                )
+            else:
+                # Place after the first `function ...() {` line.
+                func = re.search(
+                    r"(?:export\s+default\s+)?function\s+\w+\s*\([^)]*\)\s*\{",
+                    new_content,
+                )
+                if func:
+                    new_content = (
+                        new_content[: func.end()]
+                        + "\n  const navigate = useNavigate();"
+                        + new_content[func.end():]
+                    )
+
+        if new_content != content:
+            fixes[fp] = new_content
+            _log.info(
+                "fix_missing_post_auth_navigate.injected",
+                file=fp,
+                target=target,
+            )
+
+    return fixes
+
+
+def _pin_bcrypt_for_vercel(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """Ensure api/requirements.txt pins bcrypt==4.0.1 alongside passlib.
+
+    bcrypt 4.1+ removed the __about__.__version__ attribute that
+    passlib reads at backend init, so passlib's CryptContext crashes on
+    the first hash() call with:
+
+        AttributeError: module 'bcrypt' has no attribute '__about__'
+
+    Local tests use backend/requirements.txt (already pinned), but the
+    Vercel runtime installs api/requirements.txt — which the LLM may
+    generate without the pin. This helper enforces the pin in BOTH
+    requirements files so the deployed app's /api/auth/register works.
+
+    Idempotent — only edits when the pin is missing or unconstrained.
+    """
+    _log = structlog.get_logger("debugger")
+    fixes: dict = {}
+
+    for req_path in (
+        "api/requirements.txt",
+        "backend/requirements.txt",
+    ):
+        content = generated_files.get(req_path)
+        if content is None:
+            continue
+        lines = content.splitlines()
+        has_passlib = False
+        has_bcrypt = False
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("passlib"):
+                has_passlib = True
+                # Normalise any >=1.7.4 or unpinned to ==1.7.4 to match.
+                if "==1.7.4" not in stripped:
+                    line = "passlib[bcrypt]==1.7.4"
+            if stripped.startswith("bcrypt"):
+                has_bcrypt = True
+                if "==4.0.1" not in stripped:
+                    line = "bcrypt==4.0.1"
+            new_lines.append(line)
+
+        if not has_passlib:
+            continue  # not an auth project; nothing to pin
+
+        if not has_bcrypt:
+            # Insert bcrypt pin right after passlib for readability.
+            inserted = False
+            tmp: list[str] = []
+            for line in new_lines:
+                tmp.append(line)
+                if not inserted and line.strip().startswith("passlib"):
+                    tmp.append("bcrypt==4.0.1")
+                    inserted = True
+            new_lines = tmp
+            if not inserted:
+                new_lines.append("bcrypt==4.0.1")
+
+        new_content = "\n".join(new_lines)
+        if not new_content.endswith("\n"):
+            new_content += "\n"
+
+        if new_content != content:
+            fixes[req_path] = new_content
+            _log.info("pin_bcrypt_for_vercel.applied", file=req_path)
+
+    return fixes
+
+
 def _is_python_parseable(content: str) -> bool:
     """Return True when content is valid Python that ast.parse accepts."""
     try:
@@ -7700,6 +8637,24 @@ def _validate_or_rollback(
                 )
                 validated_files[path] = files_before[path]
                 validated_fixes.pop(path, None)
+
+                # If a route file is rolled back, also revert any same-cycle
+                # models.py edit — _fix_missing_admin_endpoint emits both in one
+                # pass, and leaving a stale `class User(Base)` in models.py after
+                # the route is reverted creates a duplicate-table crash next boot.
+                _MODELS_PATH = "backend/app/models.py"
+                if (
+                    path.startswith("backend/app/routes/")
+                    and _MODELS_PATH in all_fixes
+                    and _MODELS_PATH in files_before
+                ):
+                    log.info(
+                        "debugger.rolled_back_paired_file",
+                        path=_MODELS_PATH,
+                        reason=f"paired with route rollback of {path}",
+                    )
+                    validated_files[_MODELS_PATH] = files_before[_MODELS_PATH]
+                    validated_fixes.pop(_MODELS_PATH, None)
 
     # Universal import guardrail: heal any Python file mutated this cycle
     # that is missing scaffold imports (get_current_user, get_db, etc.).
@@ -7998,11 +8953,18 @@ class DebuggerAgent:
         ("fix_hook_inline_definitions", _fix_hook_inline_definitions),
         ("fix_unwrapped_context_providers", _fix_unwrapped_context_providers),
         ("fix_component_rendered_as_child", _fix_component_rendered_as_child),
+        ("fix_query_double_unwrap", _fix_query_double_unwrap),
         ("fix_shadcn_button_aschild", _fix_shadcn_button_aschild),
         ("fix_layout_import_inline_conflict", _fix_layout_import_inline_conflict),
         ("fix_app_jsx_layout_pattern", _fix_app_jsx_layout_pattern),
         ("fix_routes_config_consistency", _fix_routes_config_consistency_safe),
         ("fix_use_params_name_mismatch", _fix_use_params_name_mismatch),
+        # Create stub page files for orphan Links targeting non-existent pages
+        # so the next helper can mount them.
+        ("stub_missing_pages_for_orphan_links", _stub_missing_pages_for_orphan_links),
+        # Runs BEFORE the orphan rewriter so we mount existing pages first,
+        # then the rewriter only redirects what's truly missing on disk.
+        ("fix_mount_missing_routes_for_existing_pages", _fix_mount_missing_routes_for_existing_pages),
         ("fix_orphan_navigates_to_existing_routes", _fix_orphan_navigates_to_existing_routes),
         ("fix_remove_orphan_navbar_links", _fix_remove_orphan_navbar_links),
         ("fix_per_page_chrome_imports", _fix_per_page_chrome_imports),
@@ -8031,9 +8993,15 @@ class DebuggerAgent:
         ("fix_auth_body_shape", _fix_auth_body_shape),
         ("fix_missing_users_me", _fix_missing_users_me),
         ("fix_missing_aggregate_endpoint", _fix_missing_aggregate_endpoint),
+        ("fix_duplicate_users_table", _fix_duplicate_users_table),
         ("fix_missing_admin_endpoint", _fix_missing_admin_endpoint),
         ("auto_fix_fe_be_shape_mismatches", _auto_fix_fe_be_shape_mismatches),
         ("normalize_sqlalchemy_models", _normalize_sqlalchemy_models),
+        ("normalize_user_fk_types", _normalize_user_fk_types),
+        ("pin_bcrypt_for_vercel", _pin_bcrypt_for_vercel),
+        ("fix_missing_post_auth_navigate", _fix_missing_post_auth_navigate),
+        ("normalize_accent_css_var", _normalize_accent_css_var),
+        ("strip_notfound_from_navbar", _strip_notfound_from_navbar),
 
         # ── Phase 4: contract-driven path/method fixes ───────────────────────
         ("fix_password_change_alias", _fix_password_change_alias),
@@ -8325,6 +9293,134 @@ class DebuggerAgent:
                                 consecutive_misses=self._blind_fix_consecutive_misses,
                             )
                 self.log.warning("debug.cannot_identify_file", error=full_error_text[:200])
+
+                # ── Force agentic LLM fallback when REAL checks are failing ────
+                # Reachability / smoke / contract / fe_be_contract failures point
+                # at runtime crashes (500s) or shape mismatches that algorithmic
+                # helpers can't pinpoint to a single file.  Don't give up here —
+                # send the whole project to the LLM with a focus hint and let it
+                # patch.  This is the difference between "tests_failed_recoverable"
+                # and a shippable app.
+                passed_checks = test_results.get("passed_checks") or {}
+                FAILED_STATES = {"failed", "advisory_failed"}
+                reachability_failed = passed_checks.get("reachability") in FAILED_STATES
+                smoke_failed = passed_checks.get("smoke") in FAILED_STATES
+                contract_failed = passed_checks.get("contract") in FAILED_STATES
+                febe_failed = passed_checks.get("fe_be_contract") in FAILED_STATES
+
+                # Build a list of error strings related to those failed checks.
+                err_blob = list(test_results.get("errors") or [])
+                err_lower_blob = " ".join(str(e).lower() for e in err_blob)
+                has_500 = "server error: 500" in err_lower_blob
+                has_reach_hint = "reachability:" in err_lower_blob or has_500
+                has_smoke_hint = "smoke" in err_lower_blob and "fail" in err_lower_blob
+                has_contract_hint = "contract miss" in err_lower_blob
+
+                # Pull file paths out of any stack traces in the error strings.
+                trace_files = self._extract_files_from_500_traces(test_results)
+                has_backend_trace = bool(trace_files)
+
+                should_force_agentic = (
+                    self._llm_debug_enabled
+                    and (
+                        (reachability_failed and has_reach_hint)
+                        or (smoke_failed and has_smoke_hint)
+                        or (contract_failed and has_contract_hint)
+                        or (febe_failed and ("fe_be" in err_lower_blob or "shape" in err_lower_blob))
+                        or has_backend_trace  # trace alone is sufficient signal
+                    )
+                )
+
+                if should_force_agentic:
+                    # Build a focus hint tailored to whichever check is failing.
+                    trace_focus = ""
+                    if trace_files:
+                        trace_focus = (
+                            "STACK-TRACE FILES (top of trace first — fix here):\n  - "
+                            + "\n  - ".join(trace_files[:5])
+                            + "\n\n"
+                        )
+
+                    focus_parts: list[str] = []
+                    if reachability_failed and has_reach_hint:
+                        focus_parts.append(
+                            "REACHABILITY: One or more endpoints return HTTP 500 "
+                            "on first request. Read the relevant route handlers "
+                            "and the models they query. The most common root "
+                            "cause is a query against a singleton/owner row that "
+                            "the seed never created — the handler does "
+                            "`obj = db.query(X).first()` and then `obj.attr` "
+                            "without checking for None. Patch the handlers to "
+                            "handle the empty/missing case: return [] for list "
+                            "endpoints, 404 for singletons, or auto-create the "
+                            "singleton row when it makes sense. Also check the "
+                            "seed file — if a singleton 'owner'/'profile'/"
+                            "'settings' row is expected, seed it. Do NOT delete "
+                            "the routes."
+                        )
+                    if smoke_failed and has_smoke_hint:
+                        focus_parts.append(
+                            "SMOKE: The auth smoke test (register → login → /me) "
+                            "failed. Inspect auth_routes.py and the User model. "
+                            "Common causes: password hash field name mismatch, "
+                            "missing 'role' default, JWT secret env var name "
+                            "mismatch, response shape missing required fields."
+                        )
+                    if contract_failed and has_contract_hint:
+                        focus_parts.append(
+                            "CONTRACT: Generated API does not match the "
+                            "blueprint. Add the missing routes or align "
+                            "paths/methods to the contract."
+                        )
+                    if febe_failed:
+                        focus_parts.append(
+                            "FE↔BE: Frontend calls and backend response shapes "
+                            "diverge. Align Pydantic response_model fields with "
+                            "what the frontend reads (or vice versa)."
+                        )
+                    focus_prefix = (
+                        trace_focus
+                        + "FOCUS — agentic fallback engaged:\n\n"
+                        + "\n\n".join(focus_parts)
+                        + "\n\n"
+                    )
+
+                    self.log.info(
+                        "debug.agentic_forced",
+                        reachability=reachability_failed,
+                        smoke=smoke_failed,
+                        contract=contract_failed,
+                        fe_be=febe_failed,
+                        has_trace=has_backend_trace,
+                        trace_files=trace_files[:5],
+                        num_errors=len(err_blob),
+                    )
+                    augmented_results = dict(test_results)
+                    augmented_results["errors"] = [focus_prefix] + err_blob
+                    try:
+                        agentic_out = self._agentic_holistic_fix(
+                            test_results=augmented_results,
+                            generated_files=generated_files,
+                        )
+                    except Exception as _agentic_exc:
+                        self.log.warning(
+                            "debug.agentic_forced.exception",
+                            error=str(_agentic_exc)[:300],
+                        )
+                        agentic_out = None
+                    if agentic_out:
+                        self.log.info(
+                            "debug.agentic_forced.fixed",
+                            num_files=len(agentic_out),
+                        )
+                        return {
+                            "status": "fixed",
+                            "fixed_files": agentic_out,
+                            "attempt_counts": attempt_count,
+                            "errors": [],
+                        }
+                    self.log.warning("debug.agentic_forced.no_fixes")
+
                 return {
                     "status": "skipped",
                     "reason": "Could not auto-fix; surfaced to user",
@@ -8695,11 +9791,60 @@ class DebuggerAgent:
         )
         return original_content
 
+    @staticmethod
+    def _extract_files_from_500_traces(test_results: dict) -> list[str]:
+        """Parse error strings from test_results for stack-trace file paths.
+
+        Vercel/Python tracebacks contain lines like:
+            File "/var/task/backend/app/routes/tasks.py", line 80, in list_tasks
+            File "backend/app/routes/owner.py", line 46, ...
+        Also catches reachability error bodies that include the same lines
+        when the global exception handler echoes them.
+
+        Returns a deduplicated list of project-relative paths (e.g.
+        "backend/app/routes/tasks.py") in priority order: route files first,
+        then models, then everything else.
+        """
+        import re as _re
+        errors = test_results.get("errors") or []
+        paths: list[str] = []
+        seen: set = set()
+
+        trace_re = _re.compile(
+            r'File\s+"(?:/var/task/)?([^"]+\.py)",\s*line\s*\d+',
+        )
+        for e in errors:
+            if not isinstance(e, str):
+                continue
+            for m in trace_re.finditer(e):
+                p = m.group(1).lstrip("./").lstrip("/")
+                if "/site-packages/" in p or "/usr/lib/" in p:
+                    continue
+                if not p.startswith("backend"):
+                    p = "backend/" + p
+                if p in seen:
+                    continue
+                seen.add(p)
+                paths.append(p)
+
+        def _priority(path: str) -> int:
+            if "/routes/" in path:
+                return 0
+            if "models.py" in path:
+                return 1
+            if "schemas" in path or "seed" in path:
+                return 2
+            return 3
+
+        paths.sort(key=_priority)
+        return paths
+
     def _agentic_holistic_fix(
         self,
         test_results: dict,
         generated_files: dict,
         max_attempts: int = 2,
+        _prompt_prefix: str = "",
     ) -> dict[str, str]:
         """Last-resort agentic debug: send all errors + relevant file
         contents to Claude, receive a {path: new_content} patch map.
@@ -8747,7 +9892,8 @@ class DebuggerAgent:
         )
 
         prompt = (
-            "You are debugging a generated full-stack web app. Tests "
+            _prompt_prefix
+            + "You are debugging a generated full-stack web app. Tests "
             "are failing after algorithmic fixers + targeted regen "
             "have already run. Remaining failures need cross-file "
             "judgment or rewrites.\n\n"
@@ -8867,3 +10013,49 @@ class DebuggerAgent:
                 self.log.error("agentic_holistic_fix.exception", attempt=attempt, error=str(e))
 
         return {}
+
+    def force_agentic_holistic_fix(
+        self,
+        test_results: dict,
+        generated_files: dict,
+        ping_pong_files: "set[str] | None" = None,
+        failing_checks: "set[str] | None" = None,
+    ) -> dict[str, str]:
+        """Agentic fix variant for ping-pong situations.
+
+        Prepends a prompt hint that steers the LLM away from the
+        oscillating files so it searches for the real root cause instead
+        of re-patching the same config entries.
+        """
+        if not self._llm_debug_enabled:
+            self.log.info("force_agentic_holistic_fix.skipped", reason="llm_debug_disabled")
+            return {}
+
+        prefix_lines: list[str] = []
+        if ping_pong_files:
+            prefix_lines.append(
+                "ALERT: The following files were patched repeatedly over "
+                "the last several debug cycles but the same checks keep "
+                "failing. They are almost certainly NOT the root cause. "
+                "Do NOT modify them unless an error message directly "
+                "points at a bug inside that exact file.\n"
+                f"PING-PONG FILES: {', '.join(sorted(ping_pong_files))}\n"
+            )
+        if failing_checks:
+            prefix_lines.append(
+                f"STILL FAILING CHECKS: {', '.join(sorted(failing_checks))}\n"
+                "Identify the root-cause file for these failures and fix "
+                "it directly rather than adjusting config or routing files.\n"
+            )
+
+        prompt_prefix = "\n".join(prefix_lines) + ("\n\n" if prefix_lines else "")
+        self.log.info(
+            "force_agentic_holistic_fix.trigger",
+            ping_pong_files=sorted(ping_pong_files or []),
+            failing_checks=sorted(failing_checks or []),
+        )
+        return self._agentic_holistic_fix(
+            test_results=test_results,
+            generated_files=generated_files,
+            _prompt_prefix=prompt_prefix,
+        )

@@ -941,10 +941,15 @@ explicitly specified.
 - model files: `from app.database import Base` (do NOT create a new declarative_base);
   use only portable column types (Integer, String, Text, Boolean, DateTime, Float,
   ForeignKey) — no JSONB/ARRAY/server-side UUID defaults.
-- backend/app/seed.py: expose seed_demo_data() that inserts 3–5 realistic rows
-  per entity in dependency order (parents before children), reading actual field
-  names from models. Use real-sounding domain content, not placeholders. End with
-  a `print(f"[seed] done — ...", flush=True)`. Idempotent (empty-table check).
+- backend/app/seed.py: expose seed_demo_data() that inserts REALISTIC, PLENTIFUL
+  rows per entity in dependency order (parents before children). Use real-sounding
+  domain content — NOT placeholder text like "Item 1" or "Test Data".
+  MANDATORY MINIMUMS: for any model shown in a list/browse/menu/feed page, insert
+  AT LEAST 15 rows (browse-heavy apps) or 10 rows (list apps) or 5 rows (admin).
+  For MEDIA columns (image_url, avatar, cover_image), use picsum.photos URLs:
+    https://picsum.photos/seed/<slug>/400/300
+  For PRICE columns, use realistic ranges (restaurant: $6–$35, not $2 or $0).
+  End with a `print(f"[seed] done — ...", flush=True)`. Idempotent (empty-table check).
   If auth exists, seed BOTH demo@example.com/demo1234 AND
   admin@example.com/admin1234 (both properly hashed).
   SEED FUNCTION CONTRACT — use this exact signature (db=None, not db: Session):
@@ -1178,6 +1183,44 @@ explicitly specified.
 - AUTH ARGS ARE ALWAYS OBJECTS: pass a single `{{ email, password, name? }}`
   object to login/register. Never pass positional args like `login(email, password)`.
 
+- POST-AUTH NAVIGATION (MANDATORY) — LoginPage and RegisterPage MUST
+  navigate to a real authenticated route immediately after a successful
+  login/register. The useAuth login() and register() functions resolve
+  to the user profile when they succeed and throw on failure, so use
+  try/catch and navigate inside the try.
+
+  CORRECT — LoginPage:
+      import {{ useNavigate, Link }} from "react-router-dom"
+      const navigate = useNavigate()
+      const {{ login }} = useAuth()
+
+      const onSubmit = async (e) => {{
+        e.preventDefault()
+        try {{
+          await login({{ email, password }})
+          navigate("/dashboard", {{ replace: true }})   // ← MANDATORY
+        }} catch (err) {{
+          setError(err?.message || "Login failed")
+        }}
+      }}
+
+  WRONG — login succeeds but page never redirects (the bug we are
+  preventing):
+      const onSubmit = async (e) => {{
+        await login({{ email, password }})
+        // ← MISSING navigate(): user lands back on /login with
+        //   a populated AuthContext but no visible feedback
+      }}
+
+  Target rules:
+   * LoginPage / RegisterPage → navigate("/dashboard", {{ replace: true }})
+     when /dashboard is mounted. Otherwise navigate to the first
+     authenticated route from routes.js (the first ROUTES entry with
+     requires === "auth"). Last resort: navigate("/").
+   * LogoutPage / logout handler → navigate("/login", {{ replace: true }}).
+   * Use {{ replace: true }} so the back button does not re-show the
+     auth form after the user is logged in.
+
 - SHARED LAYOUT — App.jsx ships with a Layout component that renders <Navbar />
   and <Footer /> ONCE around every main route via <Outlet />. Page components
   MUST NOT import or render <Navbar />, <Footer />, <Sidebar />, or other chrome
@@ -1288,6 +1331,24 @@ explicitly specified.
       }}
 
   App.jsx route mounting should also loop over ROUTES to avoid drift.
+
+- CATCH-ALL ROUTE — App.jsx must include a `*` catch-all route that
+  renders NotFoundPage (or redirects to "/"). The NotFoundPage component
+  exists and is mounted, but it MUST NOT appear in routes.js, and the
+  Navbar MUST NEVER show a link to it. Any routes.js entry whose path
+  is "*" or whose component is "NotFoundPage" MUST have
+  `show_in_nav: false`. Better: omit it from routes.js entirely.
+
+- LINK-ROUTE INTEGRITY (mandatory) — EVERY <Link to="/X"> and
+  navigate("/X") you emit in any page or component MUST have a matching
+  <Route path="/X" element={{<...Page />}} /> in App.jsx AND a matching
+  entry in frontend/src/lib/routes.js. Before you finish a page that
+  references other routes, mentally re-check that those routes are mounted
+  somewhere. A Link to an unmounted route is a real test failure
+  (route_link_consistency / ORPHAN-LINK), not a stylistic issue. If the
+  blueprint mentions /projects, /skills, /profile — there must be a
+  ProjectsPage.jsx, SkillsPage.jsx, ProfilePage.jsx mounted in App.jsx
+  AND listed in routes.js.
 
 Output ONLY the file code. No markdown, no wrapper, no explanations."""
 
@@ -1978,6 +2039,13 @@ explicitly specified.
   A Navbar with zero visible links is a structural failure — every generated
   app must display at least one nav link to logged-out visitors.
 
+- CATCH-ALL ROUTE — App.jsx must include a `*` catch-all route that
+  renders NotFoundPage (or redirects to "/"). The NotFoundPage component
+  exists and is mounted, but it MUST NOT appear in routes.js, and the
+  Navbar MUST NEVER show a link to it. Any routes.js entry whose path
+  is "*" or whose component is "NotFoundPage" MUST have
+  `show_in_nav: false`. Better: omit it from routes.js entirely.
+
 - AUTH FLAG — the plan notes may contain "AUTH_DISABLED" when the app is fully
   public. Check `plan.notes` for this token before generating any file.
 
@@ -2074,10 +2142,15 @@ explicitly specified.
 - model files: `from app.database import Base` (do NOT create a new declarative_base);
   use only portable column types (Integer, String, Text, Boolean, DateTime, Float,
   ForeignKey) — no JSONB/ARRAY/server-side UUID defaults.
-- backend/app/seed.py: expose seed_demo_data() that inserts 3–5 realistic rows
-  per entity in dependency order (parents before children), reading actual field
-  names from models. Use real-sounding domain content, not placeholders. End with
-  a `print(f"[seed] done — ...", flush=True)`. Idempotent (empty-table check).
+- backend/app/seed.py: expose seed_demo_data() that inserts REALISTIC, PLENTIFUL
+  rows per entity in dependency order (parents before children). Use real-sounding
+  domain content — NOT placeholder text like "Item 1" or "Test Data".
+  MANDATORY MINIMUMS: for any model shown in a list/browse/menu/feed page, insert
+  AT LEAST 15 rows (browse-heavy apps) or 10 rows (list apps) or 5 rows (admin).
+  For MEDIA columns (image_url, avatar, cover_image), use picsum.photos URLs:
+    https://picsum.photos/seed/<slug>/400/300
+  For PRICE columns, use realistic ranges (restaurant: $6–$35, not $2 or $0).
+  End with a `print(f"[seed] done — ...", flush=True)`. Idempotent (empty-table check).
   If auth exists, seed BOTH demo@example.com/demo1234 AND
   admin@example.com/admin1234 (both properly hashed).
   SEED FUNCTION CONTRACT — use this exact signature (db=None, not db: Session):
@@ -2311,6 +2384,44 @@ explicitly specified.
 - AUTH ARGS ARE ALWAYS OBJECTS: pass a single `{{ email, password, name? }}`
   object to login/register. Never pass positional args like `login(email, password)`.
 
+- POST-AUTH NAVIGATION (MANDATORY) — LoginPage and RegisterPage MUST
+  navigate to a real authenticated route immediately after a successful
+  login/register. The useAuth login() and register() functions resolve
+  to the user profile when they succeed and throw on failure, so use
+  try/catch and navigate inside the try.
+
+  CORRECT — LoginPage:
+      import {{ useNavigate, Link }} from "react-router-dom"
+      const navigate = useNavigate()
+      const {{ login }} = useAuth()
+
+      const onSubmit = async (e) => {{
+        e.preventDefault()
+        try {{
+          await login({{ email, password }})
+          navigate("/dashboard", {{ replace: true }})   // ← MANDATORY
+        }} catch (err) {{
+          setError(err?.message || "Login failed")
+        }}
+      }}
+
+  WRONG — login succeeds but page never redirects (the bug we are
+  preventing):
+      const onSubmit = async (e) => {{
+        await login({{ email, password }})
+        // ← MISSING navigate(): user lands back on /login with
+        //   a populated AuthContext but no visible feedback
+      }}
+
+  Target rules:
+   * LoginPage / RegisterPage → navigate("/dashboard", {{ replace: true }})
+     when /dashboard is mounted. Otherwise navigate to the first
+     authenticated route from routes.js (the first ROUTES entry with
+     requires === "auth"). Last resort: navigate("/").
+   * LogoutPage / logout handler → navigate("/login", {{ replace: true }}).
+   * Use {{ replace: true }} so the back button does not re-show the
+     auth form after the user is logged in.
+
 - SHARED LAYOUT — App.jsx ships with a Layout component that renders <Navbar />
   and <Footer /> ONCE around every main route via <Outlet />. Page components
   MUST NOT import or render <Navbar />, <Footer />, <Sidebar />, or other chrome
@@ -2492,13 +2603,71 @@ USER MODEL -- DO NOT REDEFINE:
   Add OTHER models (Profile, Plant, Order, etc.) below that line.
   NEVER redefine User -- auth_routes.py depends on its exact shape.
 - For models that need a user foreign key, reference users.id as a
-  String column (UUID stored as string):
-      user_id: Mapped[str] = mapped_column(
-          String, ForeignKey("users.id"), nullable=False,
-      )
+  String column (UUID stored as string). DO NOT use Integer, UUID,
+  or GUID -- the scaffold User.id is plain String (VARCHAR), and any
+  other FK type will be rejected by Postgres at table-create time
+  with "incompatible types: X and character varying".
+
+      GOOD:
+          user_id: Mapped[str] = mapped_column(
+              String, ForeignKey("users.id"), nullable=False,
+          )
+          # or 1.x style:
+          user_id = Column(String, ForeignKey("users.id"), nullable=False)
+
+      BAD (breaks Neon/Postgres deploy):
+          user_id = Column(Integer, ForeignKey("users.id"), ...)
+          user_id = Column(UUID, ForeignKey("users.id"), ...)
+          user_id = Column(GUID(), ForeignKey("users.id"), ...)
+
 - The User model has exactly: id, email, password_hash, name, role,
   created_at. Do not add extra columns to User -- extend via
   a separate Profile model if needed.
+
+- HANDLERS MUST HANDLE EMPTY/MISSING ROWS (MANDATORY) — every route
+  handler MUST be safe when the database table is empty or the
+  requested row does not exist. Reachability probes test every endpoint
+  on a fresh DB with seed-only data; any handler that crashes on an
+  empty/missing row fails the deploy.
+
+  GOOD — singleton lookups guard with 404 or auto-create:
+      @router.get("/profile")
+      def get_profile(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+          profile = db.query(Profile).filter(Profile.user_id == user.id).first()
+          if profile is None:
+              # Either auto-create OR 404 — never raise AttributeError.
+              profile = Profile(user_id=user.id)
+              db.add(profile); db.commit(); db.refresh(profile)
+          return profile
+
+  GOOD — list endpoints return [] on empty:
+      @router.get("/tasks", response_model=list[TaskOut])
+      def list_tasks(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+          rows = db.query(Task).filter(Task.user_id == user.id).all()
+          return rows   # empty list is valid JSON []
+
+  GOOD — single-by-id returns 404 when missing:
+      @router.get("/tasks/{{task_id}}")
+      def get_task(task_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+          task = db.query(Task).filter(Task.id == task_id).first()
+          if task is None:
+              raise HTTPException(status_code=404, detail="Task not found")
+          return task
+
+  WRONG — any of these patterns causes a 500 on first request:
+      owner = db.query(Owner).first()
+      return owner.profile         # AttributeError when owner is None
+
+      task = db.query(Task).filter(Task.id == task_id).first()
+      return {{"title": task.title}} # AttributeError when missing
+
+      return db.query(Task).all()[0]  # IndexError on empty table
+
+  Rule of thumb: every .first() result must be checked for None
+  BEFORE attribute access. Every [0] / [-1] index must be guarded by
+  a len() check. Every .one() must be wrapped in try/except
+  NoResultFound. List endpoints that return rows directly are fine —
+  SQLAlchemy returns an empty list on no rows, which serialises to [].
 
 PATH CONVENTION FOR api CLIENT:
 - Pass paths RELATIVE to /api, without the /api prefix.
@@ -2818,15 +2987,19 @@ unknown URL is unacceptable.
         target = "backend/app/seed.py"
         existing = current_files.get(target, "")
         sample_str = str(item.sample_data[:3]) if item.sample_data else "[]"
+        count = max(item.count or 5, 5)  # enforce minimum of 5
         prompt = (
             f"You are modifying {target}.\n"
             f"The checklist requires a seed item:\n"
             f"  model: {item.model}\n"
-            f"  count: {item.count}\n"
+            f"  count: {count}\n"
             f"  sample_data (first 3): {sample_str}\n\n"
             f"Current file contents:\n{existing}\n\n"
-            f"Produce the COMPLETE updated seed.py that inserts at least {item.count} "
+            f"Produce the COMPLETE updated seed.py that inserts EXACTLY {count} "
             f"realistic rows of {item.model} with data shaped like sample_data. "
+            f"Use real domain-specific names and descriptions, NOT 'Item 1' or 'Test'. "
+            f"For image/photo/avatar columns use picsum.photos/seed/<slug>/400/300 URLs. "
+            f"For price/cost columns use realistic ranges (restaurant: $6–$35). "
             "Use the idempotent pattern (check count==0 before inserting). "
             "Do not remove other model seeds. "
             "Return raw Python file content only, no markdown fences."
@@ -2835,21 +3008,76 @@ unknown URL is unacceptable.
         return {target: new_content}
 
     def _regen_style_item(self, item, current_files: dict, context: str) -> dict:
+        """Inject a CSS variable into frontend/src/index.css :root block.
+
+        Defensive normalization:
+          * Force css_var to --accent when the LLM emits a synonym; the
+            scaffold only reads --accent for the accent color.
+          * Coerce value to an "R G B" triplet when given hex (#RRGGBB or
+            #RGB) or rgb(r,g,b). Tailwind composes alpha with
+            rgb(var(--accent) / <alpha-value>) so the triplet form is required.
+        """
         css_path = "frontend/src/index.css"
         existing = current_files.get(css_path, "")
-        result: dict = {}
-        if existing and item.css_var not in existing:
-            # Append the variable to the :root block.
-            if ":root {" in existing:
-                new_css = existing.replace(
-                    ":root {",
-                    f":root {{\n  {item.css_var}: {item.value};",
-                    1,
-                )
-            else:
-                new_css = existing + f"\n:root {{\n  {item.css_var}: {item.value};\n}}\n"
-            result[css_path] = new_css
-        return result
+        if not existing:
+            return {}
+
+        var_name = (item.css_var or "").strip()
+        accent_synonyms = {
+            "--color-primary", "--primary", "--brand",
+            "--brand-color", "--theme-color", "--accent-color",
+        }
+        if var_name in accent_synonyms or not var_name:
+            var_name = "--accent"
+
+        raw_value = (item.value or "").strip()
+        value = self._coerce_color_to_triplet(raw_value)
+
+        # Already present? Replace the existing line in :root so we override prior value.
+        pattern = rf"{re.escape(var_name)}\s*:\s*[^;]+;"
+        if re.search(pattern, existing):
+            new_css = re.sub(pattern, f"{var_name}: {value};", existing, count=1)
+        elif ":root {" in existing:
+            new_css = existing.replace(
+                ":root {",
+                f":root {{\n  {var_name}: {value};",
+                1,
+            )
+        else:
+            new_css = existing + f"\n:root {{\n  {var_name}: {value};\n}}\n"
+
+        if new_css == existing:
+            return {}
+        return {css_path: new_css}
+
+    @staticmethod
+    def _coerce_color_to_triplet(value: str) -> str:
+        """Return 'R G B' triplet. Accepts hex (#RRGGBB / #RGB), rgb(...) /
+        rgba(...), or an existing 'R G B' string. Falls back to the input
+        when format is unrecognised."""
+        import re as _re
+        v = value.strip().lower()
+
+        # Already a triplet "R G B"?
+        if _re.fullmatch(r"\d{1,3}\s+\d{1,3}\s+\d{1,3}", v):
+            return v
+
+        # hex: #RGB or #RRGGBB
+        m = _re.fullmatch(r"#?([0-9a-f]{3}|[0-9a-f]{6})", v)
+        if m:
+            h = m.group(1)
+            if len(h) == 3:
+                h = "".join(c * 2 for c in h)
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"{r} {g} {b}"
+
+        # rgb(r,g,b) / rgba(r,g,b,a)
+        m = _re.fullmatch(r"rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})", v)
+        if m:
+            return f"{int(m.group(1))} {int(m.group(2))} {int(m.group(3))}"
+
+        # Unknown — return as-is and let downstream catch it.
+        return value
 
     def _load_templates(self) -> dict[str, str]:
         return {

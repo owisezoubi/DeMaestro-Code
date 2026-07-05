@@ -18,11 +18,81 @@ _SUBJECTIVE_WORDS = [
 ]
 
 
+def _friendly_question_for_subjective_word(
+    found_word: str,
+    requirement_statement: str,
+) -> tuple[str, list[str]]:
+    """Turn a triggered subjective word into a plain-English preference
+    question + 2–4 pickable answer choices.
+
+    Never returns engineering vocabulary. Users see this as a chat question.
+    """
+    word = found_word.lower()
+
+    # Visual / color / look-and-feel words
+    if word in {"clean", "modern", "clear", "beautiful"} or "visible" in word or "color" in word:
+        return (
+            "What overall look and feel would you like for the app?",
+            [
+                "Warm and modern (soft orange, cream)",
+                "Cool and professional (blue, slate)",
+                "Bold and playful (bright pink, purple)",
+                "Dark mode with one accent color",
+            ],
+        )
+
+    # Speed / performance words
+    if word in {"fast", "slow", "quickly", "responsive", "snappy"}:
+        return (
+            "How quickly should the app respond to the user's actions?",
+            [
+                "As fast as a normal website — under a second per action",
+                "Best-effort — a couple of seconds is fine",
+                "I don't have a specific expectation",
+            ],
+        )
+
+    # Usability words
+    if word in {"easy", "easy to use", "simple", "user-friendly", "intuitive"}:
+        return (
+            "How much guidance should the app give new users?",
+            [
+                "Very hand-held — tooltips, walkthroughs, hints everywhere",
+                "Balanced — clear labels but no walkthroughs",
+                "Minimal — power-user style, only the essentials",
+            ],
+        )
+
+    # Quality-of-content words
+    if word in {"good", "great", "nice", "high-quality"}:
+        return (
+            "What matters most to you about the app?",
+            [
+                "Looks polished and professional",
+                "Works reliably without bugs",
+                "Fast and simple, even if plain-looking",
+            ],
+        )
+
+    # Fallback — a friendly, generic preference question.
+    return (
+        f"You mentioned '{found_word}'. What exactly would you like here?",
+        [
+            "Keep it as I described",
+            "Let me rephrase in my own words",
+        ],
+    )
+
+
 class RequirementIssue(BaseModel):
     requirement_id: str
     fundamental: Literal["atomicity", "unambiguity", "verifiability", "consistency"]
     severity: Literal["error", "warning"]
     description: str
+    # 2–4 plain-English answer choices the user can literally click.
+    # NEVER developer instructions. NEVER technical vocabulary.
+    user_options: list[str] = []
+    # INTERNAL — engineering handoff only. Never shown to the user.
     suggested_fix: Optional[str] = None
 
 
@@ -116,16 +186,25 @@ class ValidatorAgent(GeminiAgent):
                     break
             if found_word:
                 r.validation.unambiguity = FundamentalStatus.fails
-                note = f"Replace subjective word '{found_word}' with a measurable criterion"
-                r.validation.notes.append(note)
+                # INTERNAL developer note — never shown to the user.
+                internal_note = (
+                    f"Replace subjective word '{found_word}' with a measurable criterion"
+                )
+                r.validation.notes.append(internal_note)
                 num_algorithmic_failures += 1
-                # Surface as AmbiguityFlag so the user can resolve it.
+
+                # USER-FACING question + options — plain English, asks about
+                # preference, not measurability.
+                friendly_question, friendly_options = _friendly_question_for_subjective_word(
+                    found_word=found_word,
+                    requirement_statement=r.statement,
+                )
                 sr.ambiguities.append(
                     AmbiguityFlag(
                         id=_next_val_id(),
                         field_path=f"user_requirements[{idx}].statement",
-                        reason=note,
-                        suggested_options=["Replace with a measurable criterion"],
+                        reason=friendly_question,
+                        suggested_options=friendly_options,
                         requirement_id=r.id,
                     )
                 )
@@ -169,14 +248,19 @@ class ValidatorAgent(GeminiAgent):
                 else:
                     continue
 
+                # Prefer user_options from the LLM (plain-English choices).
+                # Fall back to a neutral prompt — NEVER fall back to
+                # suggested_fix, which contains engineering language.
+                options = issue.user_options or [
+                    "Yes, that's what I meant",
+                    "No — let me explain what I want",
+                ]
                 sr.ambiguities.append(
                     AmbiguityFlag(
                         id=_next_val_id(),
                         field_path=field_path,
                         reason=issue.description,
-                        suggested_options=[
-                            issue.suggested_fix or "Provide a more specific statement"
-                        ],
+                        suggested_options=options,
                         requirement_id=req_id,
                     )
                 )

@@ -215,7 +215,36 @@ If the user already described a style (e.g., "sleek and dark", "bright and fun")
 # Field-by-Field Guidelines
 
 ## app_name
-Short, human-readable. Infer from context if not stated. No version numbers or marketing copy.
+
+Short, human-readable. The user has ALREADY typed a project name into
+the DeMaestro UI — you will receive it as `PROJECT_NAME` in the context
+above the requirements text.
+
+Rules:
+
+1. If the requirements text does NOT mention any name, use PROJECT_NAME
+   verbatim as `app_name`. Do not invent a name.
+
+2. If the requirements text mentions ONE name and it matches PROJECT_NAME
+   (case-insensitive, ignoring whitespace), use that name.
+
+3. If the requirements text mentions a DIFFERENT name than PROJECT_NAME,
+   set `app_name` to PROJECT_NAME AND emit an ambiguity so the user
+   can decide which one to keep:
+
+       {
+         "id": "AMB-XX",
+         "field_path": "app_name",
+         "reason": "You named the project \"<PROJECT_NAME>\" but the description mentions \"<name from text>\". Which name should the app use?",
+         "suggested_options": ["<PROJECT_NAME>", "<name from text>"],
+         "requirement_id": null
+       }
+
+4. If the requirements mention MULTIPLE names, keep PROJECT_NAME as the
+   default and list ALL other candidates in `suggested_options`.
+
+Never invent marketing copy, never add version numbers, never
+concatenate PROJECT_NAME with a description word.
 
 ## summary
 One paragraph (3–5 sentences): what the app does, who uses it, primary value proposition. Skeleton scope only — omit production concerns.

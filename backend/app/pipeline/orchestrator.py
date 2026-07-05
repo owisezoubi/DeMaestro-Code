@@ -89,7 +89,11 @@ def _run_structuring(uid: str, project_id: str) -> None:
             return
 
         coordinator = RequirementsCoordinator()
-        sr = coordinator.analyze(combined)
+        _project_meta = firestore_service.get_project(uid, project_id)
+        sr = coordinator.analyze(
+            combined,
+            project_name=_project_meta.name if _project_meta else None,
+        )
 
         if len(sr.ambiguities) > _INITIAL_AMBIGUITY_CAP:
             log.info(

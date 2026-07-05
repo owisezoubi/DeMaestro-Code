@@ -48,6 +48,26 @@ from app.services import vercel_deployer
 
 log = structlog.get_logger("GenerationOrchestrator")
 
+
+def _resolve_app_name(
+    sr,
+    project_name_from_firestore: "str | None",
+    project_id: str,
+) -> str:
+    """Resolve the human-readable app name in strict priority order:
+       1. sr.app_name          — Analyst + Clarification result (best)
+       2. project.name         — What the user typed in NewProject
+       3. project_id (last)    — Hash fallback, ugly but never empty
+    """
+    for candidate in (
+        getattr(sr, "app_name", None),
+        project_name_from_firestore,
+        project_id,
+    ):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip()
+    return "demaestro-app"
+
 _MAX_TEST_CYCLES = 10
 
 # ── Cancellation registry ────────────────────────────────────────────────────
@@ -246,6 +266,7 @@ _REAL_CHECK_NAMES: frozenset = frozenset({
     "reachability",    # endpoint existence probe (404/405/5xx = FAIL)
     "fe_be_contract",  # offline frontend↔backend body-shape match
     "verify",          # blueprint↔generated-code route existence check
+    "browser_smoke",   # Playwright: catches runtime React errors (Objects not valid as child, etc.)
 })
 
 
@@ -589,11 +610,20 @@ def _item_to_dict(item) -> dict:
 
 
 def _checklist_results_to_payload(results: list) -> list:
-    """Convert a list of CheckResult objects to serialisable dicts."""
-    return [
-        {"item_id": r.item_id, "status": r.status, "reason": r.reason or ""}
-        for r in results
-    ]
+    """Convert CheckResult objects to serialisable dicts, deduping by item_id.
+
+    Keeps the LATEST entry per item_id. Duplicates appear because live-refresh
+    emits fresh results every debug cycle — without dedup the frontend can
+    show >100%.
+    """
+    seen: dict = {}
+    for r in results:
+        seen[r.item_id] = {
+            "item_id": r.item_id,
+            "status": r.status,
+            "reason": r.reason or "",
+        }
+    return list(seen.values())
 
 
 class GenerationOrchestrator:
@@ -1808,6 +1838,7 @@ class GenerationOrchestrator:
             _last_rollback_signature: tuple | None = None
             _agentic_invocations: int = 0
             _MAX_AGENTIC_INVOCATIONS = 5
+            _cycle_file_history: list[set[str]] = []  # per-cycle fixed-file sets
 
             for cycle in range(_MAX_TEST_CYCLES):
                 firestore_service.set_project_status(uid, project_id, ProjectStatus.testing)
@@ -1928,6 +1959,58 @@ class GenerationOrchestrator:
                         c for c, s in test_results.get("passed_checks", {}).items()
                         if s == "failed"
                     }
+
+                    # ── Ping-pong detection ───────────────────────────────────
+                    # If the EXACT same set of files was "fixed" in 2+ consecutive
+                    # cycles and the same checks are still failing, algorithmic
+                    # fixers are undoing each other's work.  Escalate directly to
+                    # the focused agentic fix that steers the LLM away from the
+                    # oscillating files.
+                    _cycle_file_history.append(current_fixed_files)
+                    if len(_cycle_file_history) > 3:
+                        _cycle_file_history.pop(0)
+                    _PING_PONG_WINDOW = 2
+                    _ping_pong = (
+                        len(_cycle_file_history) >= _PING_PONG_WINDOW
+                        and bool(current_fixed_files)
+                        and all(
+                            fs == current_fixed_files
+                            for fs in _cycle_file_history[-_PING_PONG_WINDOW:]
+                        )
+                        and bool(current_failing_checks)
+                        and current_failing_checks == last_cycle_failing_checks
+                    )
+                    if _ping_pong and _agentic_invocations < _MAX_AGENTIC_INVOCATIONS:
+                        _agentic_invocations += 1
+                        log.warning(
+                            "pipeline.ping_pong_detected",
+                            project_id=project_id,
+                            cycle=cycle + 1,
+                            files=sorted(current_fixed_files),
+                            failing=sorted(current_failing_checks),
+                            invocation=_agentic_invocations,
+                        )
+                        _pp_fixes = self.debugger.force_agentic_holistic_fix(
+                            test_results=test_results,
+                            generated_files=generated_files,
+                            ping_pong_files=current_fixed_files,
+                            failing_checks=current_failing_checks,
+                        )
+                        if _pp_fixes:
+                            generated_files.update(_pp_fixes)
+                            firestore_service.update_project(uid, project_id, {
+                                "generated_files": generated_files,
+                            })
+                            log.info(
+                                "pipeline.ping_pong.agentic_applied",
+                                project_id=project_id,
+                                patched=list(_pp_fixes.keys()),
+                            )
+                            _cycle_file_history.clear()
+                            no_progress_cycles = 0
+                            last_cycle_fixed_files = set()
+                            last_cycle_failing_checks = set()
+                            continue
 
                     # ── No-progress guard ────────────────────────────────────
                     # Two conditions that both indicate the debug loop is stuck:
@@ -2196,6 +2279,28 @@ class GenerationOrchestrator:
                         )
                     _save_snapshot(project_id, generated_files, blueprint_dict,
                                    f"post_cycle_{_cycle_count}", plan.model_dump())
+
+                    # Live checklist refresh — push updated pass/fail counts to
+                    # Firestore so the frontend counter ticks up in real time.
+                    if _checklist_full:
+                        try:
+                            _cl_results = run_checklist(
+                                _checklist_full, generated_files, {}, ""
+                            )
+                            firestore_service.update_project(uid, project_id, {
+                                "checklist_results": _checklist_results_to_payload(_cl_results),
+                            })
+                            log.info(
+                                "pipeline.checklist.live_refresh",
+                                project_id=project_id,
+                                cycle=cycle,
+                                num_pass=sum(1 for r in _cl_results if r.status == "pass"),
+                                num_fail=sum(1 for r in _cl_results if r.status != "pass"),
+                            )
+                        except Exception as _exc:
+                            log.warning("pipeline.checklist.live_refresh_failed",
+                                        project_id=project_id, error=str(_exc)[:200])
+
                     # Cancellation checkpoint: after debug cycle
                     if is_cancelled(project_id):
                         log.info("pipeline.cancelled_by_user", project_id=project_id, at_phase="post_debug")
@@ -2499,6 +2604,28 @@ class GenerationOrchestrator:
                 )
                 log.info("pipeline.verify.skipped", project_id=project_id, reason=reason)
 
+            # ── Final checklist re-verification ─────────────────────────────
+            # Runs once right before packaging so the UI and the ZIP agree on
+            # what actually shipped. Wrapped in try/except — packaging must not
+            # be blocked by a checklist failure.
+            if _checklist_full:
+                try:
+                    _cl_final = run_checklist(
+                        _checklist_full, generated_files, {}, ""
+                    )
+                    firestore_service.update_project(uid, project_id, {
+                        "checklist_results": _checklist_results_to_payload(_cl_final),
+                    })
+                    log.info(
+                        "pipeline.checklist.final_refresh",
+                        project_id=project_id,
+                        num_pass=sum(1 for r in _cl_final if r.status == "pass"),
+                        total=len(_cl_final),
+                    )
+                except Exception as _exc:
+                    log.warning("pipeline.checklist.final_refresh_failed",
+                                project_id=project_id, error=str(_exc)[:200])
+
             # ── STEP 4: Package → ZIP ────────────────────────────────────────
             firestore_service.set_project_status(uid, project_id, ProjectStatus.packaging)
             firestore_service.update_project(uid, project_id, {"current_stage": "packaging"})
@@ -2538,16 +2665,31 @@ class GenerationOrchestrator:
                     "deployment_error": None,
                 })
 
+                _project_doc = firestore_service.get_project(uid, project_id)
+                _app_name = _resolve_app_name(
+                    sr,
+                    getattr(_project_doc, "name", None) if _project_doc else None,
+                    project_id,
+                )
+                log.info(
+                    "pipeline.deploy.app_name_resolved",
+                    project_id=project_id,
+                    sr_app_name=getattr(sr, "app_name", None),
+                    project_name=getattr(_project_doc, "name", None) if _project_doc else None,
+                    resolved=_app_name,
+                )
+
                 def _bg_deploy(
                     _uid=uid, _project_id=project_id,
                     _files=dict(generated_files),
-                    _app_name=getattr(sr, "app_name", None) or project_id,
+                    _app_name=_app_name,
                 ):
                     try:
                         result = vercel_deployer.deploy(
                             project_name=_app_name,
                             files=_files,
                             wait_for_ready=True,
+                            stable_id=_project_id,
                         )
                         log.info(
                             "pipeline.auto_deploy.done",
@@ -2558,6 +2700,7 @@ class GenerationOrchestrator:
                                 "deployment_status": "ready",
                                 "deployment_url": result["url"],
                                 "deployment_project_name": result["project_name"],
+                                "deployment_display_name": result.get("display_name"),
                                 "deployment_error": None,
                             })
                             log.info(

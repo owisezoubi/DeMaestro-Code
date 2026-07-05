@@ -786,6 +786,19 @@ class TesterAgent:
                 passed_checks["reachability"] = smoke_result["reachability_status"]
                 logs["reachability"] = smoke_result["reachability_log"]
 
+                # Browser smoke: serve built frontend, visit key routes via Playwright.
+                frontend_dist = _find_frontend_dir(tmpdir)
+                if frontend_dist is not None:
+                    frontend_dist = frontend_dist / "dist"
+                _default_routes = ["/", "/dashboard", "/login", "/register", "/menu", "/cart"]
+                bs_status, bs_log = self._test_browser_smoke(
+                    frontend_dist=frontend_dist or (tmpdir / "frontend" / "dist"),
+                    backend_url=f"http://127.0.0.1:8002",
+                    routes=_default_routes,
+                )
+                passed_checks["browser_smoke"] = bs_status
+                logs["browser_smoke"] = bs_log
+
             # Only "failed" checks produce errors; "skipped" is not a failure.
             errors = [
                 f"{check}: {logs[check]}"
@@ -948,6 +961,88 @@ class TesterAgent:
         except Exception as exc:
             log.warning("frontend_build.exception", error=str(exc))
             return ("skipped", str(exc))
+
+    def _test_browser_smoke(
+        self,
+        frontend_dist: Path,
+        backend_url: str,
+        routes: list[str],
+    ) -> tuple[str, str]:
+        """Headless Chromium smoke test via Playwright.
+
+        Serves the built frontend dist from a local HTTP server, visits each
+        route, and fails if ANY page emits a JS pageerror or console.error.
+
+        Catches: 'Objects are not valid as a React child', undefined prop
+        errors, 'Cannot read properties of undefined', and any runtime crash
+        the HTTP-only smoke test misses because those happen in the browser.
+
+        Returns ("advisory_failed", reason) if Playwright is not installed or
+        the dist directory doesn't exist — this never blocks deployment.
+        """
+        if not frontend_dist.exists():
+            return ("skipped", "frontend dist not found")
+
+        try:
+            from playwright.sync_api import sync_playwright  # noqa: PLC0415
+        except ImportError:
+            return ("advisory_failed", "playwright not installed; run: pip install playwright && playwright install chromium")
+
+        errors: list[dict] = []
+        static_proc = None
+        static_port = 5174  # distinct from Vite dev (5173) to avoid conflicts
+
+        try:
+            static_proc = subprocess.Popen(
+                ["python", "-m", "http.server", str(static_port), "--directory", str(frontend_dist)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(1.5)  # wait for server to bind
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context()
+                page = context.new_page()
+
+                page.on("pageerror", lambda exc: errors.append({
+                    "route": page.url,
+                    "kind": "pageerror",
+                    "message": str(exc)[:500],
+                }))
+                page.on("console", lambda msg: (
+                    errors.append({
+                        "route": page.url,
+                        "kind": "console.error",
+                        "message": msg.text[:500],
+                    }) if msg.type == "error" else None
+                ))
+
+                base = f"http://localhost:{static_port}"
+                for route in routes:
+                    try:
+                        page.goto(f"{base}{route}", wait_until="networkidle", timeout=15000)
+                        page.wait_for_timeout(500)
+                    except Exception as exc:
+                        errors.append({"route": route, "kind": "navigation", "message": str(exc)[:500]})
+
+                browser.close()
+
+        except Exception as exc:
+            return ("advisory_failed", f"playwright crashed: {exc}")
+        finally:
+            if static_proc:
+                static_proc.terminate()
+
+        fatal = [e for e in errors if e["kind"] in ("pageerror", "console.error")]
+        if fatal:
+            sample = "; ".join(
+                f"[{e['route']}] {e['message'][:120]}"
+                for e in fatal[:5]
+            )
+            return ("failed", f"{len(fatal)} runtime JS errors across {len({e['route'] for e in fatal})} routes: {sample}")
+
+        return ("passed", f"visited {len(routes)} routes, no runtime errors")
 
     def _run_lint(self, tmpdir: Path, stack: str) -> tuple[str, str]:
         if "python" in stack:

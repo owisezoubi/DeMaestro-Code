@@ -87,6 +87,7 @@ class ProjectMeta(BaseModel):
     deployment_status: Optional[str] = None
     deployment_error: Optional[str] = None
     deployment_project_name: Optional[str] = None
+    deployment_display_name: Optional[str] = None
     error_message: Optional[str] = None
     last_error: Optional[str] = None
     install_error_log: Optional[str] = None

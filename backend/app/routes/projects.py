@@ -266,6 +266,7 @@ async def deployment_status(project_id: str, user: CurrentUser):
         "url": project.deployment_url or None,
         "error": project.deployment_error or None,
         "project_name": project.deployment_project_name or None,
+        "display_name": project.deployment_display_name or None,
     }
 
 
@@ -300,7 +301,7 @@ async def deploy_project(project_id: str, user: CurrentUser):
         "deployment_error": None,
     })
 
-    app_name = project_id
+    app_name = project.name or project_id
 
     def _bg(_uid=user.uid, _pid=project_id, _files=dict(files), _name=app_name):
         try:
@@ -308,15 +309,48 @@ async def deploy_project(project_id: str, user: CurrentUser):
                 project_name=_name,
                 files=_files,
                 wait_for_ready=True,
+                stable_id=_pid,
             )
             log.info("deploy.bg.success", project_id=_pid, url=result["url"])
             try:
-                fs.update_project(_uid, _pid, {
-                    "deployment_status": "ready",
+                live = result.get("live_smoke") or {}
+                deployment_status = "ready"
+                deployment_error = None
+                if isinstance(live, dict) and live.get("ok") is False:
+                    deployment_status = "ready_degraded"
+                    deployment_error = live.get("reason") or "live smoke failed"
+                    log.warning(
+                        "deploy.bg.live_smoke_failed",
+                        project_id=_pid,
+                        reason=live.get("reason"),
+                        failures=live.get("failures", [])[:5],
+                    )
+
+                update_payload = {
+                    "deployment_status": deployment_status,
                     "deployment_url": result["url"],
                     "deployment_project_name": result["project_name"],
-                    "deployment_error": None,
-                })
+                    "deployment_display_name": result.get("display_name"),
+                    "deployment_error": deployment_error,
+                }
+                # If the deployer's pre-deploy normalizers patched any files,
+                # persist them back so ZIP downloads and the file explorer
+                # show the same code that was actually shipped to Vercel.
+                patched = result.get("patched_files")
+                if patched and patched != _files:
+                    changed = [
+                        p for p in patched
+                        if _files.get(p) != patched.get(p)
+                    ]
+                    if changed:
+                        update_payload["generated_files"] = patched
+                        log.info(
+                            "deploy.bg.files_persisted",
+                            project_id=_pid,
+                            changed=changed[:20],
+                            count=len(changed),
+                        )
+                fs.update_project(_uid, _pid, update_payload)
                 log.info("deploy.bg.firestore_updated", project_id=_pid)
             except Exception as fs_exc:
                 log.error(

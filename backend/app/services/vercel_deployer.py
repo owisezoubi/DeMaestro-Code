@@ -56,14 +56,31 @@ def is_auto_deploy_enabled() -> bool:
     return flag not in ("false", "0", "no", "off")
 
 
-def _slugify(name: str) -> str:
-    """Vercel project name rules: lowercase, alphanumeric, hyphens, max 63 chars."""
+def _slugify(name: str, project_id: str | None = None, force_suffix: bool = False) -> str:
+    """Vercel project name rules: lowercase, alphanumeric, hyphens, max 63 chars.
+
+    Without force_suffix: returns a clean slug with no id suffix (preferred UX).
+    With force_suffix + project_id: appends a 6-char id prefix so projects with
+    the same display name don't collide on Vercel.
+    """
     slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
-    return (slug or "demaestro-app")[:63]
+    slug = slug or "demaestro-app"
+
+    if force_suffix and project_id:
+        suffix = re.sub(r"[^a-z0-9]", "", project_id.lower())[:6]
+        if suffix:
+            # Reserve room for "-" + suffix inside the 63-char limit.
+            slug = slug[: 63 - len(suffix) - 1] + "-" + suffix
+
+    return slug[:63]
 
 
 def _ensure_project(token: str, slug: str) -> None:
-    """Create the Vercel project if it doesn't exist; skip 409 Conflict."""
+    """Create the Vercel project if it doesn't exist.
+
+    Raises VercelDeployError("409: ...") on name collision so the caller can
+    retry with a suffixed slug.  Raises for all other non-2xx responses too.
+    """
     r = requests.post(
         f"{VERCEL_API}/v9/projects",
         headers={"Authorization": f"Bearer {token}"},
@@ -73,7 +90,7 @@ def _ensure_project(token: str, slug: str) -> None:
     if r.status_code in (200, 201):
         log.info("vercel.project.created", slug=slug)
     elif r.status_code == 409:
-        log.info("vercel.project.exists", slug=slug)
+        raise VercelDeployError(f"409: project name {slug!r} already exists")
     else:
         raise VercelDeployError(
             f"create_project {r.status_code}: {r.text[:200]}"
@@ -81,7 +98,13 @@ def _ensure_project(token: str, slug: str) -> None:
 
 
 def _set_env(token: str, slug: str, key: str, value: str) -> None:
-    """Upsert an env var on the Vercel project (production + preview targets)."""
+    """Upsert an env var on the Vercel project (production + preview targets).
+
+    Vercel's CREATE endpoint returns ENV_ALREADY_EXISTS for any conflict.
+    Empirically observed status codes for that case: 400 (older API) and
+    403 (current API). When we see that, we list the project's env vars,
+    look up the matching id, and PATCH the value instead.
+    """
     r = requests.post(
         f"{VERCEL_API}/v9/projects/{slug}/env",
         headers={"Authorization": f"Bearer {token}"},
@@ -95,8 +118,21 @@ def _set_env(token: str, slug: str, key: str, value: str) -> None:
     )
     if r.status_code in (200, 201):
         return
-    if r.status_code == 400 and "already exists" in r.text.lower():
-        # Look up the existing env var id and PATCH it.
+
+    # Detect the "already exists" case across both code paths Vercel uses.
+    body_lc = r.text.lower()
+    is_already_exists = (
+        r.status_code in (400, 403)
+        and (
+            "env_already_exists" in body_lc
+            or "already exists" in body_lc
+        )
+    )
+
+    if is_already_exists:
+        # Look up the existing env var id(s) and PATCH each (the var may
+        # exist in multiple scopes; PATCH the first match — its value is
+        # shared across targets when the env was created with multi-target).
         ls = requests.get(
             f"{VERCEL_API}/v9/projects/{slug}/env",
             headers={"Authorization": f"Bearer {token}"},
@@ -105,20 +141,30 @@ def _set_env(token: str, slug: str, key: str, value: str) -> None:
         if ls.status_code != 200:
             raise VercelDeployError(f"list_env {ls.status_code}: {ls.text[:200]}")
         envs = ls.json().get("envs", [])
-        match = next((e for e in envs if e.get("key") == key), None)
-        if not match:
-            raise VercelDeployError(f"env '{key}' exists but id not findable")
-        patch = requests.patch(
-            f"{VERCEL_API}/v9/projects/{slug}/env/{match['id']}",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"value": value},
-            timeout=REQUEST_TIMEOUT,
-        )
-        if patch.status_code not in (200, 201):
-            raise VercelDeployError(
-                f"patch_env {key} {patch.status_code}: {patch.text[:200]}"
+        matches = [e for e in envs if e.get("key") == key]
+        if not matches:
+            # Sometimes the env API filters by user scope; treat as benign.
+            log.warning("vercel.set_env.exists_but_no_match", key=key)
+            return
+        for m in matches:
+            patch = requests.patch(
+                f"{VERCEL_API}/v9/projects/{slug}/env/{m['id']}",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"value": value},
+                timeout=REQUEST_TIMEOUT,
             )
+            if patch.status_code not in (200, 201):
+                # Per-match patch failure is non-fatal — log and continue.
+                log.warning(
+                    "vercel.set_env.patch_failed",
+                    key=key,
+                    env_id=m.get("id"),
+                    status=patch.status_code,
+                    body=patch.text[:200],
+                )
+        log.info("vercel.set_env.updated", key=key, matches=len(matches))
         return
+
     raise VercelDeployError(f"set_env {key} {r.status_code}: {r.text[:200]}")
 
 
@@ -161,6 +207,65 @@ def _create_deployment(token: str, slug: str, files: dict) -> dict:
             f"create_deployment {r.status_code}: {r.text[:400]}"
         )
     return r.json()
+
+
+def _per_project_database_url(project_slug: str) -> tuple[str, str]:
+    """Return (per_project_db_url, db_name).
+
+    Side effect: ensures the per-project database exists on Neon by
+    issuing CREATE DATABASE against the admin URL. Idempotent — uses
+    IF NOT EXISTS where the role allows, falls back to catching the
+    'database already exists' error otherwise.
+    """
+    import re as _re
+    from urllib.parse import urlparse, urlunparse
+    import psycopg2
+
+    admin_url = os.environ.get("DEMAESTRO_POSTGRES_URL", "").strip()
+    if not admin_url:
+        raise RuntimeError("DEMAESTRO_POSTGRES_URL not set")
+
+    # Sanitise the slug into a valid Postgres database identifier.
+    safe_slug = _re.sub(r"[^a-z0-9_]", "_", project_slug.lower())[:48]
+    if not safe_slug:
+        safe_slug = "app"
+    db_name = f"app_{safe_slug}"
+
+    parsed = urlparse(admin_url)
+    # path is "/<dbname>"; replace it with the per-project name
+    new_path = "/" + db_name
+    per_project_url = urlunparse(parsed._replace(path=new_path))
+
+    # Create the database if it does not exist. Postgres CREATE DATABASE
+    # cannot run inside a transaction, so use autocommit.
+    try:
+        conn = psycopg2.connect(admin_url)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'CREATE DATABASE "{db_name}"')
+            log.info("vercel.neon.per_project_db.created", db=db_name)
+        except psycopg2.errors.DuplicateDatabase:
+            log.info("vercel.neon.per_project_db.exists", db=db_name)
+        except Exception as _create_exc:
+            # Some Neon plans throw a generic error on duplicate; treat
+            # "already exists" substring as benign.
+            msg = str(_create_exc).lower()
+            if "already exists" in msg:
+                log.info("vercel.neon.per_project_db.exists_caught", db=db_name)
+            else:
+                raise
+        finally:
+            conn.close()
+    except Exception as _conn_exc:
+        log.error(
+            "vercel.neon.per_project_db.failed",
+            error=str(_conn_exc)[:200],
+            db=db_name,
+        )
+        raise
+
+    return per_project_url, db_name
 
 
 def initialize_neon_db(files: dict, database_url: str) -> dict:
@@ -341,30 +446,161 @@ def _poll_ready(token: str, deployment_id: str) -> dict:
     raise VercelDeployError(f"timeout after {BUILD_POLL_TIMEOUT}s")
 
 
+def _apply_pre_deploy_normalizers(files: dict) -> dict:
+    """Apply algorithmic fixups to the files dict before every deploy.
+
+    The debugger only runs during test cycles. Redeploys (and resumed
+    projects in `ready` state) skip the debugger entirely, so any new
+    auto-fixer added to debugger.py would never reach already-generated
+    apps. This wrapper re-runs the SAFE, algorithmic-only debugger
+    helpers on every deploy so existing projects benefit from new fixes
+    just by clicking Redeploy.
+
+    LLM-based debug passes (_agentic_holistic_fix, _fix_with_claude) are
+    deliberately NOT invoked here — those are only safe inside the test
+    pipeline where every change is validated by re-running tests.
+    """
+    out = dict(files)
+
+    # ── 1. bcrypt pinning (Vercel runtime bug fix) ────────────────────────
+    for req_path in ("api/requirements.txt", "backend/requirements.txt"):
+        content = out.get(req_path)
+        if content is None:
+            continue
+        lines = content.splitlines()
+        has_passlib = any(l.strip().startswith("passlib") for l in lines)
+        if not has_passlib:
+            continue  # not an auth project
+
+        has_bcrypt = any(l.strip().startswith("bcrypt") for l in lines)
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("passlib") and "==1.7.4" not in stripped:
+                line = "passlib[bcrypt]==1.7.4"
+            if stripped.startswith("bcrypt") and "==4.0.1" not in stripped:
+                line = "bcrypt==4.0.1"
+            new_lines.append(line)
+
+        if not has_bcrypt:
+            inserted = False
+            tmp: list[str] = []
+            for line in new_lines:
+                tmp.append(line)
+                if not inserted and line.strip().startswith("passlib"):
+                    tmp.append("bcrypt==4.0.1")
+                    inserted = True
+            new_lines = tmp
+            if not inserted:
+                new_lines.append("bcrypt==4.0.1")
+
+        new_content = "\n".join(new_lines)
+        if not new_content.endswith("\n"):
+            new_content += "\n"
+        if new_content != content:
+            out[req_path] = new_content
+            log.info("vercel.pre_deploy.bcrypt_pinned", file=req_path)
+
+    # ── 2. Reuse selected debugger helpers (algorithmic-only) ─────────────
+    # These are safe to run on already-generated code: each is idempotent
+    # and only mutates files when a specific known bug pattern is present.
+    try:
+        from app.ai.claude.agents.debugger import (
+            _fix_missing_post_auth_navigate,
+            _strip_notfound_from_navbar,
+            _normalize_accent_css_var,
+            _normalize_user_fk_types,
+        )
+    except Exception as _imp_exc:
+        log.warning("vercel.pre_deploy.helpers_import_failed", error=str(_imp_exc)[:200])
+        return out
+
+    helpers = (
+        ("post_auth_navigate", _fix_missing_post_auth_navigate),
+        ("strip_notfound_navbar", _strip_notfound_from_navbar),
+        ("normalize_accent_css_var", _normalize_accent_css_var),
+        ("normalize_user_fk_types", _normalize_user_fk_types),
+    )
+    for name, fn in helpers:
+        try:
+            patches = fn({}, out) or {}
+        except Exception as _h_exc:
+            log.warning(
+                "vercel.pre_deploy.helper_failed",
+                helper=name,
+                error=str(_h_exc)[:200],
+            )
+            continue
+        if patches:
+            out.update(patches)
+            log.info(
+                "vercel.pre_deploy.helper_applied",
+                helper=name,
+                files=list(patches.keys()),
+            )
+
+    return out
+
+
 def deploy(
     project_name: str,
     files: dict,
     wait_for_ready: bool = True,
+    stable_id: str | None = None,
 ) -> dict:
-    """Deploy files to Vercel. Returns {url, deployment_id, project_name, state}."""
+    """Deploy files to Vercel. Returns {url, deployment_id, project_name, display_name, state}."""
     token = os.environ.get("DEMAESTRO_VERCEL_TOKEN")
-    pg_url = os.environ.get("DEMAESTRO_POSTGRES_URL")
-    if not token or not pg_url:
+    if not token or not os.environ.get("DEMAESTRO_POSTGRES_URL"):
         raise VercelDeployError(
             "DEMAESTRO_VERCEL_TOKEN or DEMAESTRO_POSTGRES_URL not set"
         )
 
     import secrets as _secrets
 
+    # Try a clean slug (e.g. "sitnbite") — only fall back to the id-suffixed form
+    # (e.g. "sitnbite-ab12cd") when a name collision is detected (HTTP 409).
     slug = _slugify(project_name)
-    log.info("vercel.deploy.start", project=slug, files=len(files))
+    log.info("vercel.deploy.start", project=slug, display_name=project_name, files=len(files))
 
-    _ensure_project(token, slug)
+    # Apply Vercel-critical fixes (bcrypt pin, etc.) BEFORE pushing files.
+    # Redeploy paths skip the debugger, so old projects need this safety net.
+    files = _apply_pre_deploy_normalizers(files)
+
+    try:
+        _ensure_project(token, slug)
+        log.info("vercel.slug.clean", slug=slug)
+    except VercelDeployError as _exc:
+        if "409" in str(_exc):
+            # Name collision — another DeMaestro project owns that clean slug.
+            # Retry with the stable-id suffix so this project gets its own name.
+            slug = _slugify(project_name, project_id=stable_id, force_suffix=True)
+            log.info("vercel.slug.collision_retry", slug=slug)
+            try:
+                _ensure_project(token, slug)
+            except VercelDeployError as _exc2:
+                if "409" in str(_exc2):
+                    # 409 on suffixed slug = our own existing project; proceed.
+                    log.info("vercel.project.exists", slug=slug)
+                else:
+                    raise
+        else:
+            raise
+
+    # Per-project DB isolation: each Vercel deploy gets its own Neon database.
+    per_project_db_url, per_project_db_name = _per_project_database_url(slug)
+    log.info("vercel.deploy.using_per_project_db", db=per_project_db_name)
+
     disable_deployment_protection(token, slug)
 
+    # auth.py reads JWT_SECRET (NOT JWT_SECRET_KEY). Set both names so
+    # the deployed app picks up the real secret regardless of which env
+    # var the scaffold reads. Falling back to the hardcoded dev secret
+    # in production is a security issue we want to make impossible.
+    jwt_secret_value = _secrets.token_hex(32)
     env_vars = {
-        "DATABASE_URL": pg_url,
-        "JWT_SECRET_KEY": _secrets.token_hex(32),
+        "DATABASE_URL": per_project_db_url,
+        "JWT_SECRET": jwt_secret_value,
+        "JWT_SECRET_KEY": jwt_secret_value,
         "CORS_ORIGINS": "*",
     }
     for k, v in env_vars.items():
@@ -373,7 +609,7 @@ def deploy(
     # Initialize Neon DB BEFORE deploying so tables + seed exist when the
     # first Vercel request arrives (no cold-start race).
     log.info("vercel.neon_init.start", project=slug)
-    neon_result = initialize_neon_db(files, pg_url)
+    neon_result = initialize_neon_db(files, per_project_db_url)
     log.info(
         "vercel.neon_init.done",
         project=slug,
@@ -412,13 +648,36 @@ def deploy(
         state = "BUILDING"
 
     log.info("vercel.deploy.done", project=slug, url=final, state=state)
+    log.info(
+        "vercel.deploy.isolated_db",
+        project=project_name,
+        db=per_project_db_name,
+        url=final,
+    )
+
+    live_smoke: dict = {"ok": True, "failures": []}
+    if wait_for_ready and final:
+        # Full authed-flow smoke — register, login, probe every authed GET.
+        try:
+            live_smoke = _live_authed_smoke(final)
+            if live_smoke["ok"]:
+                log.info("vercel.post_deploy.live_smoke_ok")
+            else:
+                log.error(
+                    "vercel.post_deploy.live_smoke_failed",
+                    reason=live_smoke["reason"],
+                    num_failures=len(live_smoke["failures"]),
+                    sample=live_smoke["failures"][:3],
+                )
+        except Exception as _smoke_exc:
+            log.warning("vercel.post_deploy.live_smoke_exception", error=str(_smoke_exc)[:200])
 
     if wait_for_ready and final:
         # Probe the deployed app: wake the function, verify DB, retry seed if needed.
         try:
-            requests.get(f"{final}/api/_health/db", timeout=20)
+            requests.get(f"{final}/_health/db", timeout=20)
             time.sleep(3)
-            check = requests.get(f"{final}/api/_health/db", timeout=20)
+            check = requests.get(f"{final}/_health/db", timeout=20)
             if check.status_code == 200:
                 data = check.json()
                 if not data.get("connect"):
@@ -449,7 +708,7 @@ def deploy(
                             url=final,
                             hint="re-running initialize_neon_db",
                         )
-                        retry = initialize_neon_db(files, pg_url)
+                        retry = initialize_neon_db(files, per_project_db_url)
                         log.info(
                             "vercel.post_deploy.reinit_done",
                             users_seeded=retry["users_seeded"],
@@ -477,8 +736,87 @@ def deploy(
         "url": final,
         "deployment_id": did,
         "project_name": slug,
+        "display_name": project_name,
         "state": state,
+        # Patched files (after _apply_pre_deploy_normalizers ran).
+        # The caller should persist these back to Firestore so the
+        # ZIP download and file explorer reflect the same code that
+        # was actually deployed.
+        "patched_files": files,
+        "live_smoke": live_smoke,
     }
+
+
+def _live_authed_smoke(base_url: str) -> dict:
+    """Walk the deployed app end-to-end: register, login, then probe
+    every auth-required GET endpoint with the JWT.  Returns:
+        {"ok": True, "failures": []}                   on success
+        {"ok": False, "failures": [...], "reason": "..."} on failure
+    """
+    import secrets as _secrets
+    import json as _json
+
+    email = f"probe_{_secrets.token_hex(4)}@example.com"
+    pwd = "ProbePass!2024"
+    try:
+        reg = requests.post(
+            f"{base_url}/api/auth/register",
+            json={"email": email, "password": pwd, "name": "Probe"},
+            timeout=15,
+        )
+        if reg.status_code not in (200, 201):
+            return {"ok": False, "reason": f"register {reg.status_code}: {reg.text[:200]}", "failures": []}
+        try:
+            token = reg.json().get("access_token")
+        except Exception:
+            token = None
+        if not token:
+            lg = requests.post(
+                f"{base_url}/api/auth/login",
+                json={"email": email, "password": pwd},
+                timeout=15,
+            )
+            if lg.status_code != 200:
+                return {"ok": False, "reason": f"login {lg.status_code}: {lg.text[:200]}", "failures": []}
+            try:
+                token = lg.json().get("access_token")
+            except Exception:
+                token = None
+        if not token:
+            return {"ok": False, "reason": "no JWT from register or login", "failures": []}
+
+        ops = requests.get(f"{base_url}/openapi.json", timeout=15)
+        if ops.status_code != 200:
+            return {"ok": False, "reason": f"openapi {ops.status_code}", "failures": []}
+        try:
+            schema = ops.json()
+        except Exception as je:
+            return {"ok": False, "reason": f"openapi parse: {je}", "failures": []}
+
+        failures: list[dict] = []
+        for path, ops_obj in (schema.get("paths") or {}).items():
+            for method_lc, op in (ops_obj or {}).items():
+                if method_lc.upper() != "GET":
+                    continue
+                probe_path = re.sub(r"\{[^}]+\}", "1", path)
+                url = f"{base_url}{probe_path}"
+                try:
+                    r = requests.get(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=15,
+                    )
+                except Exception as exc:
+                    failures.append({"path": path, "status": 0, "body": str(exc)[:300]})
+                    continue
+                if r.status_code >= 500:
+                    failures.append({"path": path, "status": r.status_code, "body": r.text[:400]})
+
+        if failures:
+            return {"ok": False, "reason": f"{len(failures)} endpoint(s) returned 500", "failures": failures}
+        return {"ok": True, "failures": []}
+    except Exception as exc:
+        return {"ok": False, "reason": f"smoke exception: {exc}", "failures": []}
 
 
 def fetch_vercel_runtime_logs(
@@ -528,7 +866,7 @@ def post_deploy_smoke(
 
     probes = [
         ("GET", "/health"),
-        ("GET", "/api/_health/db"),
+        ("GET", "/_health/db"),
         ("GET", "/openapi.json"),
     ]
     if contract_paths:

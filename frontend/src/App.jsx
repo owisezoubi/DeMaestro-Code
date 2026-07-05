@@ -24,8 +24,10 @@ function Layout({ children }) {
   return (
     <>
       <Navbar />
-      <ActiveGenerationBanner />
-      {children}
+      <div className="pt-[88px]">
+        <ActiveGenerationBanner />
+        {children}
+      </div>
     </>
   )
 }

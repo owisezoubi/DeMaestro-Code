@@ -18,13 +18,22 @@ import {
   ChevronRight,
   XCircle,
   Lock,
+  Trash2,
+  RefreshCw,
+  Sparkles,
+  FolderTree,
+  MessageSquareQuote,
+  Circle,
 } from 'lucide-react'
 
 import { getGenerationStatus, startGeneration, rerunTests, stopGeneration, restartFromScratch } from '../api/generation'
+import { deleteProjectAndPurge } from '../lib/deleteWithCachePurge'
 import DeploymentPanel from '../components/DeploymentPanel'
 import GeneratedFileTree from '../components/GeneratedFileTree'
+import GenerationAmbience from '../components/GenerationAmbience'
+import EntertainingLoader from '../components/EntertainingLoader'
 
-// Ordered pipeline stages — each maps to one or more project statuses
+// Ordered pipeline stages
 const STAGES = [
   {
     id: 'generate',
@@ -63,7 +72,6 @@ const STAGES = [
   },
 ]
 
-// Map every project status to a stage index
 const STATUS_TO_STAGE = {
   approved: -1,
   stopped: -1,
@@ -84,36 +92,163 @@ const STATUS_TO_STAGE = {
 
 const DONE_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed'])
 const TERMINAL_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed', 'failed', 'tests_failed_recoverable', 'stopped'])
+const DANGER_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed', 'failed', 'stopped'])
 
 function getStageState(stageIdx, currentStatus) {
-  // All stages complete when app is deployed
   if (currentStatus === 'deployed') return 'completed'
-  // Stages 0-3 complete when packaging is done / deploy phase starts
   if ((currentStatus === 'ready' || currentStatus === 'ready_with_warnings') && stageIdx < 4) return 'completed'
   if ((currentStatus === 'ready' || currentStatus === 'ready_with_warnings') && stageIdx === 4) return 'active'
   if (currentStatus === 'failed') return 'failed'
   if (currentStatus === 'tests_failed_recoverable') {
-    // Generate stage is done; Test stage shows as failed
     if (stageIdx === 0) return 'completed'
     if (stageIdx === 1) return 'failed'
     return 'pending'
   }
-
   const currentStageIdx = STATUS_TO_STAGE[currentStatus] ?? -1
-
   if (stageIdx < currentStageIdx) return 'completed'
   if (stageIdx === currentStageIdx) return 'active'
   return 'pending'
 }
 
+// ── Summary markdown parser ────────────────────────────────────────────────────
+
+function parseSummary(md) {
+  if (!md || typeof md !== 'string') return null
+  const lines = md.split('\n')
+  const sections = []
+  let title = null
+  let currentSection = null
+  let currentParagraph = []
+
+  const flushParagraph = () => {
+    if (currentParagraph.length && currentSection) {
+      currentSection.blocks.push({ kind: 'p', text: currentParagraph.join(' ').trim() })
+      currentParagraph = []
+    }
+  }
+  const flushSection = () => {
+    flushParagraph()
+    if (currentSection) sections.push(currentSection)
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, '')
+    const trimmed = line.trim()
+    if (/^#\s+/.test(trimmed) && !title) {
+      title = trimmed.replace(/^#\s+/, '')
+      continue
+    }
+    if (/^##\s+/.test(trimmed)) {
+      flushSection()
+      currentSection = { heading: trimmed.replace(/^##\s+/, ''), blocks: [] }
+      continue
+    }
+    if (/^###\s+/.test(trimmed)) {
+      flushParagraph()
+      if (!currentSection) currentSection = { heading: null, blocks: [] }
+      currentSection.blocks.push({ kind: 'sub', text: trimmed.replace(/^###\s+/, '') })
+      continue
+    }
+    if (/^[-*]\s+/.test(trimmed)) {
+      flushParagraph()
+      if (!currentSection) currentSection = { heading: null, blocks: [] }
+      const last = currentSection.blocks[currentSection.blocks.length - 1]
+      if (last && last.kind === 'ul') {
+        last.items.push(trimmed.replace(/^[-*]\s+/, ''))
+      } else {
+        currentSection.blocks.push({ kind: 'ul', items: [trimmed.replace(/^[-*]\s+/, '')] })
+      }
+      continue
+    }
+    if (!trimmed) { flushParagraph(); continue }
+    if (!currentSection) currentSection = { heading: null, blocks: [] }
+    currentParagraph.push(trimmed)
+  }
+  flushSection()
+  return { title, sections }
+}
+
+function SummaryRendered({ text }) {
+  const parsed = parseSummary(text)
+  if (!parsed) return null
+  return (
+    <div className="space-y-5">
+      {parsed.title && (
+        <div className="pb-2 border-b border-surface-border">
+          <h3 className="text-xl font-black text-text-default leading-tight">{parsed.title}</h3>
+        </div>
+      )}
+      {parsed.sections.map((sec, i) => (
+        <div key={i} className="space-y-2">
+          {sec.heading && (
+            <p className="text-[10px] font-bold uppercase tracking-widest text-accent">{sec.heading}</p>
+          )}
+          {sec.blocks.map((b, j) => {
+            if (b.kind === 'sub') {
+              return <p key={j} className="text-sm font-semibold text-text-default">{b.text}</p>
+            }
+            if (b.kind === 'ul') {
+              return (
+                <ul key={j} className="space-y-1.5">
+                  {b.items.map((item, k) => (
+                    <li key={k} className="flex items-start gap-2 text-sm text-text-default/85">
+                      <span className="mt-1.5 flex-shrink-0 w-1.5 h-1.5 rounded-full bg-accent" />
+                      <span className="leading-relaxed">{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              )
+            }
+            return <p key={j} className="text-sm text-text-default/85 leading-relaxed">{b.text}</p>
+          })}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function InitialRequestPanel({ text }) {
+  if (!text || !text.trim()) return null
+  return (
+    <PremiumCard>
+      <div className="flex items-center gap-2 mb-3">
+        <MessageSquareQuote className="w-4 h-4 text-accent" />
+        <h2 className="text-sm font-bold text-text-default uppercase tracking-widest">Your request</h2>
+      </div>
+      <div className="relative pl-4 border-l-2 border-accent/40">
+        <p className="text-sm text-text-default/85 leading-relaxed italic whitespace-pre-line">
+          "{text.trim()}"
+        </p>
+        <p className="text-xs text-text-muted mt-2">What you typed in when you created this project.</p>
+      </div>
+    </PremiumCard>
+  )
+}
+
+// Premium card wrapper
+function PremiumCard({ children, className = '' }) {
+  return (
+    <div className={`relative rounded-2xl border border-surface-border
+                     bg-surface-panel/80 backdrop-blur-sm shadow-sm
+                     shadow-black/5 overflow-hidden ${className}`}>
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r
+                      from-transparent via-accent/40 to-transparent" />
+      <div className="p-6">{children}</div>
+    </div>
+  )
+}
+
 export default function ProjectGeneration() {
   const { id: projectId } = useParams()
   const { user } = useAuth()
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+  const [deleteConfirm, setDeleteConfirm] = useState(false)
+  const [deletingProject, setDeletingProject] = useState(false)
 
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['generationStatus', projectId],
     queryFn: () => getGenerationStatus(projectId),
-    // React Query v5: refetchInterval receives the query object
     refetchInterval: (query) => {
       const s = query.state.data?.status
       if (TERMINAL_STATUSES.has(s)) return false
@@ -121,20 +256,32 @@ export default function ProjectGeneration() {
     },
   })
 
+  async function handleDeleteProject() {
+    setDeletingProject(true)
+    try {
+      await deleteProjectAndPurge(qc, projectId)
+      toast.success('Project deleted')
+      navigate('/dashboard')
+    } catch (err) {
+      toast.error('Failed to delete: ' + (err.message || 'Unknown error'))
+      setDeletingProject(false)
+    }
+  }
+
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-primary-600" />
+      <div className="min-h-screen bg-surface-page flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-accent" />
       </div>
     )
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-slate-50 dark:bg-slate-900 flex items-center justify-center">
-        <div className="card w-96 border-red-200 bg-red-50">
-          <h2 className="text-base font-semibold text-red-700 mb-2">Error Loading Status</h2>
-          <p className="text-sm text-red-600 mb-4">{error.friendlyMessage || error.message}</p>
+      <div className="min-h-screen bg-surface-page flex items-center justify-center">
+        <div className="rounded-xl border border-error/30 bg-error/5 p-6 w-96">
+          <h2 className="text-base font-semibold text-error mb-2">Error Loading Status</h2>
+          <p className="text-sm text-error/80 mb-4">{error.friendlyMessage || error.message}</p>
           <button className="btn-primary w-full" onClick={() => window.location.reload()}>
             Retry
           </button>
@@ -144,38 +291,81 @@ export default function ProjectGeneration() {
   }
 
   const currentStatus = status?.status ?? 'generating'
-  const isDone = currentStatus === 'ready' || currentStatus === 'ready_with_warnings' || currentStatus === 'deployed'
+  const isDone = DONE_STATUSES.has(currentStatus)
   const isFailed = currentStatus === 'failed'
   const isRecoverable = currentStatus === 'tests_failed_recoverable'
   const isStopped = currentStatus === 'stopped'
   const isInProgress = !isDone && !isFailed && !isRecoverable && !isStopped
+  const showDangerZone = DANGER_STATUSES.has(currentStatus)
+
+  // Compute progress pct for EntertainingLoader
+  const currentStageIdx = STATUS_TO_STAGE[currentStatus] ?? 0
+  const progressPct = status?.total_files > 0
+    ? (((status.generated_count ?? 0) / status.total_files) * 100)
+    : (((currentStageIdx + 0.5) / STAGES.length) * 100)
+  const currentStage = STAGES[Math.max(0, currentStageIdx)]
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
+    <div className="relative min-h-screen bg-surface-page">
+      <GenerationAmbience />
 
-      <main className="max-w-3xl mx-auto px-4 py-8 space-y-6">
+      <main className="max-w-5xl mx-auto px-4 py-8 space-y-6">
+        {/* Original user request */}
+        {status?.initial_request && (
+          <InitialRequestPanel text={status.initial_request} />
+        )}
+
         {/* Blueprint / requirements panel */}
         {(status?.blueprint || status?.structured_requirements || status?.summary) && (
-          <BlueprintPanel
-            blueprint={status.blueprint}
-            summary={status.summary}
-            structuredRequirements={status.structured_requirements}
-            projectId={projectId}
-          />
+          <PremiumCard>
+            <BlueprintPanel
+              blueprint={status.blueprint}
+              summary={status.summary}
+              structuredRequirements={status.structured_requirements}
+              projectId={projectId}
+            />
+          </PremiumCard>
         )}
 
         {/* Checklist panel */}
         {status?.checklist?.length > 0 && (
-          <ChecklistPanel
-            checklist={status.checklist}
-            checklistResults={status.checklist_results || []}
-            projectId={projectId}
-          />
+          <PremiumCard>
+            <ChecklistPanel
+              checklist={status.checklist}
+              checklistResults={status.checklist_results || []}
+              projectId={projectId}
+            />
+          </PremiumCard>
+        )}
+
+        {/* Persistent file explorer — visible whenever files exist */}
+        {status?.generated_files && Object.keys(status.generated_files).length > 0 && (
+          <PremiumCard>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <FolderTree className="w-4 h-4 text-accent" />
+                <h2 className="text-sm font-semibold text-text-default">
+                  Project Explorer
+                </h2>
+                <span className="text-xs text-text-muted">
+                  ({Object.keys(status.generated_files).length} files)
+                </span>
+              </div>
+              <a
+                href={`/api/projects/${projectId}/zip`}
+                download
+                className="text-xs text-accent hover:underline"
+              >
+                Download all
+              </a>
+            </div>
+            <GeneratedFileTree files={status.generated_files} />
+          </PremiumCard>
         )}
 
         {/* Page title */}
         <div className="text-center">
-          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100 mb-1">
+          <h1 className="text-2xl font-semibold text-text-default mb-1">
             {isDone
               ? 'Your App is Ready!'
               : isFailed
@@ -186,7 +376,7 @@ export default function ProjectGeneration() {
               ? 'Generation Stopped'
               : 'Building Your App'}
           </h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+          <p className="text-sm text-text-muted">
             {isDone && 'Your application has been generated and packaged.'}
             {isFailed && 'Something went wrong. See the error below.'}
             {isRecoverable && 'Your files are intact — re-run tests or regenerate from scratch.'}
@@ -195,8 +385,8 @@ export default function ProjectGeneration() {
           </p>
         </div>
 
-        {/* ── Pipeline timeline ── */}
-        <div className="card">
+        {/* Pipeline timeline */}
+        <PremiumCard>
           <div className="flex items-start justify-between gap-2">
             {STAGES.map((stage, idx) => {
               const state = getStageState(idx, currentStatus)
@@ -205,25 +395,23 @@ export default function ProjectGeneration() {
 
               return (
                 <div key={stage.id} className="flex flex-col items-center flex-1 relative">
-                  {/* Connector line (between stages) */}
                   {!isLast && (
                     <div
                       className={`absolute top-6 left-1/2 w-full h-0.5 transition-colors duration-500 ${
-                        state === 'completed' ? 'bg-emerald-400' : 'bg-slate-200 dark:bg-slate-700'
+                        state === 'completed' ? 'bg-emerald-400' : 'bg-surface-border'
                       }`}
                     />
                   )}
 
-                  {/* Stage circle */}
                   <div
                     className={`relative z-10 w-12 h-12 rounded-full flex items-center justify-center mb-2 transition-all duration-300 ${
                       state === 'completed'
-                        ? 'bg-emerald-100 text-emerald-600 ring-2 ring-emerald-300'
+                        ? 'bg-emerald-100 text-emerald-600 ring-2 ring-emerald-300 dark:bg-emerald-900/30 dark:text-emerald-400'
                         : state === 'active'
-                        ? 'bg-primary-100 text-primary-600 ring-2 ring-primary-400 animate-pulse'
+                        ? 'bg-accent/15 text-accent ring-2 ring-accent/40 animate-pulse shadow-lg shadow-accent/20'
                         : state === 'failed'
-                        ? 'bg-red-100 text-red-500'
-                        : 'bg-slate-100 dark:bg-slate-700 text-slate-400 dark:text-slate-500'
+                        ? 'bg-error/10 text-error'
+                        : 'bg-surface-border/50 text-text-muted'
                     }`}
                   >
                     {state === 'completed' ? (
@@ -237,82 +425,56 @@ export default function ProjectGeneration() {
 
                   <p
                     className={`text-xs font-semibold text-center ${
-                      state === 'active' ? 'text-primary-700 dark:text-primary-400' : 'text-slate-500 dark:text-slate-400'
+                      state === 'active' ? 'text-accent' : 'text-text-muted'
                     }`}
                   >
                     {stage.label}
                   </p>
-                  <p className="text-xs text-slate-400 dark:text-slate-500 text-center mt-0.5 hidden sm:block">
+                  <p className="text-xs text-text-muted text-center mt-0.5 hidden sm:block">
                     {stage.description}
                   </p>
                 </div>
               )
             })}
           </div>
-        </div>
+        </PremiumCard>
 
-        {/* ── In-progress activity card ── */}
+        {/* In-progress: EntertainingLoader + activity card */}
         {isInProgress && (
-          <div className="card space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin text-primary-600" />
-                <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Current Activity</h2>
-              </div>
+          <PremiumCard>
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <h2 className="text-sm font-semibold text-text-default">Current Activity</h2>
               <StopButton projectId={projectId} status={currentStatus} />
             </div>
 
-            <div>
-              <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1">Status</p>
-              <p className="text-sm font-medium text-primary-700 dark:text-primary-400 capitalize">
-                {currentStatus.replace(/_/g, ' ')}
-              </p>
-            </div>
-
-            {/* File generation progress bar */}
-            {status?.total_files > 0 && (
-              <div>
-                <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
-                  <span>Files generated</span>
-                  <span>
-                    {status.generated_count ?? 0} / {status.total_files}
-                  </span>
-                </div>
-                <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-1.5">
-                  <div
-                    className="bg-primary-600 h-1.5 rounded-full transition-all duration-500"
-                    style={{
-                      width: `${Math.round(
-                        ((status.generated_count ?? 0) / status.total_files) * 100
-                      )}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            )}
+            <EntertainingLoader
+              progressPct={progressPct}
+              stageLabel={currentStage?.label || 'Working'}
+              stageIcon={currentStage?.icon}
+            />
 
             {/* Test results checks */}
             {status?.test_results?.passed_checks && (
-              <div>
-                <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Test Results</p>
+              <div className="mt-4">
+                <p className="text-xs text-text-muted uppercase tracking-wide mb-2">Test Results</p>
                 <div className="grid grid-cols-2 gap-2">
                   {Object.entries(status.test_results.passed_checks).map(([check, passed]) => (
                     <div key={check} className="flex items-center gap-1.5">
                       {passed ? (
                         <CheckCircle2 size={14} className="text-emerald-500 flex-shrink-0" />
                       ) : (
-                        <AlertCircle size={14} className="text-red-500 flex-shrink-0" />
+                        <AlertCircle size={14} className="text-error flex-shrink-0" />
                       )}
-                      <span className="text-xs text-slate-600 dark:text-slate-400 capitalize">{check}</span>
+                      <span className="text-xs text-text-muted capitalize">{check}</span>
                     </div>
                   ))}
                 </div>
               </div>
             )}
-          </div>
+          </PremiumCard>
         )}
 
-        {/* ── Success screen ── */}
+        {/* Success screen */}
         {isDone && (
           <SuccessScreen
             zipUrl={status.zip_url}
@@ -325,32 +487,106 @@ export default function ProjectGeneration() {
           />
         )}
 
-        {/* ── Error screen ── */}
-        {isFailed && <ErrorScreen errorMessage={status.error_message} projectId={projectId} />}
-
-        {isRecoverable && (
-          <RecoverableFailureScreen
-            projectId={projectId}
-            lastError={status.last_error}
-            realFailures={status.real_failures || []}
-            testErrorLog={status.test_error_log}
-          />
+        {/* Error screen */}
+        {isFailed && (
+          <PremiumCard>
+            <ErrorScreen errorMessage={status.error_message} projectId={projectId} />
+          </PremiumCard>
         )}
 
-        {/* ── Stopped screen ── */}
+        {isRecoverable && (
+          <PremiumCard>
+            <RecoverableFailureScreen
+              projectId={projectId}
+              lastError={status.last_error}
+              realFailures={status.real_failures || []}
+              testErrorLog={status.test_error_log}
+            />
+          </PremiumCard>
+        )}
+
+        {/* Stopped screen */}
         {isStopped && (
-          <div className="card border-slate-200 bg-slate-50 dark:bg-slate-800/50 space-y-4">
-            <div className="flex items-center gap-2">
-              <AlertCircle size={20} className="text-slate-500 flex-shrink-0" />
-              <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Generation Stopped</h2>
+          <PremiumCard>
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <AlertCircle size={20} className="text-text-muted flex-shrink-0" />
+                <h2 className="text-sm font-semibold text-text-default">Generation Stopped</h2>
+              </div>
+              <p className="text-sm text-text-muted">
+                The generation pipeline was stopped by request. You can restart it from scratch to generate a new version.
+              </p>
+              <RestartFromScratchButton projectId={projectId} status={currentStatus} />
             </div>
-            <p className="text-sm text-slate-600 dark:text-slate-400">
-              The generation pipeline was stopped by request. You can restart it from scratch to generate a new version.
-            </p>
-            <RestartFromScratchButton projectId={projectId} status={currentStatus} />
+          </PremiumCard>
+        )}
+
+        {/* Danger Zone */}
+        {showDangerZone && (
+          <div className="relative rounded-2xl border border-error/30 bg-error/5 overflow-hidden">
+            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-error/40 to-transparent" />
+            <div className="p-6">
+              <h3 className="text-sm font-semibold text-error mb-1">Danger Zone</h3>
+              <p className="text-xs text-text-muted mb-4">
+                Deleting a project is permanent and cannot be undone.
+              </p>
+              <button
+                onClick={() => setDeleteConfirm(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium
+                           border border-error/40 text-error hover:bg-error/10 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete project
+              </button>
+            </div>
           </div>
         )}
       </main>
+
+      {/* Delete confirmation modal */}
+      {deleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => { if (!deletingProject) setDeleteConfirm(false) }}
+        >
+          <div
+            className="bg-surface-panel rounded-xl shadow-xl p-6 max-w-sm w-full mx-4 border border-surface-border"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-text-default mb-2">Delete project?</h2>
+            <p className="text-sm text-text-muted mb-6">
+              This will permanently delete all generated files, the deployment, and this project record. This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setDeleteConfirm(false)}
+                disabled={deletingProject}
+                className="btn-secondary disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteProject}
+                disabled={deletingProject}
+                className="px-4 py-2 rounded-lg text-sm font-medium
+                           bg-red-600 hover:bg-red-700 text-white
+                           disabled:opacity-60 transition-colors
+                           inline-flex items-center gap-2"
+              >
+                {deletingProject ? (
+                  <>
+                    <span className="inline-block w-3.5 h-3.5 border-2 border-white
+                                      border-t-transparent rounded-full animate-spin" />
+                    Deleting…
+                  </>
+                ) : (
+                  'Delete project'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -364,9 +600,9 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog, projectId
 
   return (
     <div className="space-y-5">
-      {/* Banner */}
+      {/* 1. Success banner */}
       <div
-        className={`rounded-xl text-white p-8 text-center shadow-md ${
+        className={`rounded-2xl text-white p-8 text-center shadow-md ${
           hasWarnings
             ? 'bg-gradient-to-r from-amber-500 to-orange-500'
             : 'bg-gradient-to-r from-emerald-500 to-teal-500'
@@ -385,12 +621,12 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog, projectId
 
       {/* Warning detail */}
       {hasWarnings && lastError && (
-        <div className="card border-amber-200 bg-amber-50 space-y-2">
-          <p className="text-xs font-semibold text-amber-800">Test warning</p>
-          <p className="text-xs text-amber-700 break-words">{lastError}</p>
+        <PremiumCard>
+          <p className="text-xs font-semibold text-amber-800 dark:text-amber-300 mb-2">Test warning</p>
+          <p className="text-xs text-amber-700 dark:text-amber-400 break-words">{lastError}</p>
           {errorLogPreview && (
-            <div className="mt-1 space-y-1">
-              <pre className="text-xs text-amber-700 font-mono bg-amber-100 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+            <div className="mt-2 space-y-1">
+              <pre className="text-xs text-amber-700 dark:text-amber-300 font-mono bg-amber-100 dark:bg-amber-900/30 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
                 {showErrorLog ? testErrorLog : errorLogPreview}
                 {!showErrorLog && errorLogTruncated && '…'}
               </pre>
@@ -404,13 +640,20 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog, projectId
               )}
             </div>
           )}
-        </div>
+        </PremiumCard>
       )}
 
-      {/* Download */}
-      <div className="card space-y-3">
-        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Download your code</h3>
-        <p className="text-sm text-slate-500 dark:text-slate-400">
+      {/* 2. Live URL (DeploymentPanel) */}
+      {projectId && (
+        <PremiumCard>
+          <DeploymentPanel projectId={projectId} uid={uid} />
+        </PremiumCard>
+      )}
+
+      {/* 3. Download ZIP */}
+      <PremiumCard>
+        <h3 className="text-sm font-semibold text-text-default mb-2">Download your code</h3>
+        <p className="text-sm text-text-muted mb-4">
           Your project is packaged as a ZIP archive. The download link is valid for 7 days.
         </p>
         {zipUrl ? (
@@ -428,19 +671,9 @@ function SuccessScreen({ zipUrl, hasWarnings, lastError, testErrorLog, projectId
             Preparing download…
           </button>
         )}
-      </div>
+      </PremiumCard>
 
-      {/* Deployment panel (animated URL button inside) */}
-      {projectId && <DeploymentPanel projectId={projectId} uid={uid} />}
-
-      {/* Generated file tree */}
-      {generatedFiles && Object.keys(generatedFiles).length > 0 && (
-        <div className="card space-y-3">
-          <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">Generated files</h3>
-          <GeneratedFileTree files={generatedFiles} />
-        </div>
-      )}
-
+      {/* 4. Blueprint / Requirements (collapsible, defaultOpen=false) — rendered by parent via BlueprintPanel at top */}
     </div>
   )
 }
@@ -480,25 +713,25 @@ function ErrorScreen({ errorMessage, projectId }) {
   })
 
   return (
-    <div className="card border-red-200 bg-red-50 space-y-4">
+    <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <AlertCircle size={20} className="text-red-600 flex-shrink-0" />
-        <h2 className="text-sm font-semibold text-red-700">Generation Failed</h2>
+        <AlertCircle size={20} className="text-error flex-shrink-0" />
+        <h2 className="text-sm font-semibold text-error">Generation Failed</h2>
       </div>
 
       {errorMessage && (
-        <div className="bg-red-100 border border-red-200 rounded-lg p-3">
-          <p className="text-xs font-mono text-red-700 break-words">{errorMessage}</p>
+        <div className="bg-error/5 border border-error/20 rounded-lg p-3">
+          <p className="text-xs font-mono text-error/80 break-words">{errorMessage}</p>
         </div>
       )}
 
-      <p className="text-sm text-slate-600 dark:text-slate-400">
+      <p className="text-sm text-text-muted">
         Something went wrong during code generation. Retry starts fresh from cycle 1
         — your requirements and blueprint are preserved.
       </p>
 
       <button
-        className="btn-primary bg-red-600 hover:bg-red-700"
+        className="btn-primary bg-red-600 hover:bg-red-700 w-full"
         onClick={() => retryMut.mutate()}
         disabled={retryMut.isPending}
       >
@@ -522,39 +755,29 @@ function RecoverableFailureScreen({ projectId, lastError, realFailures, testErro
     onError: (err) => toast.error(err.response?.data?.detail || err.message || 'Re-run failed.'),
   })
 
-  const rerunAlgoOnly = useMutation({
-    mutationFn: () => rerunTests(projectId, false),
-    onSuccess: invalidate,
-    onError: (err) => toast.error(err.response?.data?.detail || err.message || 'Re-run failed.'),
-  })
-
   const regenerateMut = useMutation({
     mutationFn: () => startGeneration(projectId),
     onSuccess: invalidate,
     onError: (err) => toast.error(err.response?.data?.detail || err.message || 'Regeneration failed.'),
   })
 
-  const anyPending = rerunWithLlm.isPending || rerunAlgoOnly.isPending || regenerateMut.isPending
+  const anyPending = rerunWithLlm.isPending || regenerateMut.isPending
 
   return (
-    <div className="card border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 space-y-4">
+    <div className="space-y-4">
       <div className="flex items-center gap-2">
-        <AlertCircle size={20} className="text-amber-600 flex-shrink-0" />
-        <h2 className="text-sm font-semibold text-amber-800 dark:text-amber-300">
-          Tests Did Not Pass — Files Intact
-        </h2>
+        <AlertCircle size={20} className="text-warning flex-shrink-0" />
+        <h2 className="text-sm font-semibold text-warning">Tests Did Not Pass — Files Intact</h2>
       </div>
 
       {realFailures.length > 0 && (
         <div>
-          <p className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1.5">
-            Failed checks
-          </p>
+          <p className="text-xs text-text-muted uppercase tracking-wide mb-1.5">Failed checks</p>
           <div className="flex flex-wrap gap-1.5">
             {realFailures.map((check) => (
               <span
                 key={check}
-                className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300"
+                className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-error/10 text-error"
               >
                 {check}
               </span>
@@ -564,14 +787,14 @@ function RecoverableFailureScreen({ projectId, lastError, realFailures, testErro
       )}
 
       {lastError && (
-        <div className="bg-amber-100 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-lg p-3">
-          <p className="text-xs text-amber-800 dark:text-amber-200 break-words">{lastError}</p>
+        <div className="bg-warning/5 border border-warning/20 rounded-lg p-3">
+          <p className="text-xs text-warning/80 break-words">{lastError}</p>
         </div>
       )}
 
       {testErrorLog && (
         <details className="group">
-          <summary className="text-xs text-slate-500 dark:text-slate-400 cursor-pointer select-none hover:text-slate-700 dark:hover:text-slate-300">
+          <summary className="text-xs text-text-muted cursor-pointer select-none hover:text-text-default">
             Show error log
           </summary>
           <pre className="mt-2 text-xs font-mono bg-slate-900 text-slate-100 rounded p-3 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
@@ -580,34 +803,64 @@ function RecoverableFailureScreen({ projectId, lastError, realFailures, testErro
         </details>
       )}
 
-      <p className="text-sm text-slate-600 dark:text-slate-400">
-        Your generated files are preserved. Choose how to proceed:
-      </p>
+      <p className="text-sm text-text-muted">Your generated files are preserved. Choose how to proceed:</p>
 
-      <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {/* Primary: re-run tests with LLM */}
         <button
-          className="btn-primary w-full"
           onClick={() => rerunWithLlm.mutate()}
           disabled={anyPending}
+          className="group relative overflow-hidden
+                     px-5 py-3 rounded-xl font-semibold text-sm
+                     bg-surface-panel border border-surface-border
+                     text-text-default
+                     hover:border-accent/50 hover:bg-accent/5
+                     disabled:opacity-60 disabled:cursor-not-allowed
+                     transition-all duration-200
+                     flex items-center justify-center gap-2"
         >
-          {rerunWithLlm.isPending ? 'Starting…' : 'Re-run Tests'}
+          {rerunWithLlm.isPending ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Starting…
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-4 h-4" />
+              Re-run Tests
+            </>
+          )}
         </button>
 
+        {/* Decisive: regenerate from scratch */}
         <button
-          className="btn-secondary w-full"
-          onClick={() => rerunAlgoOnly.mutate()}
-          disabled={anyPending}
-          title="Uses deterministic fixes only — no Claude API calls"
-        >
-          {rerunAlgoOnly.isPending ? 'Starting…' : 'Re-run Tests (algorithmic only)'}
-        </button>
-
-        <button
-          className="btn-outline w-full text-slate-600 dark:text-slate-400"
           onClick={() => regenerateMut.mutate()}
           disabled={anyPending}
+          className="group relative overflow-hidden
+                     px-5 py-3 rounded-xl font-bold text-sm
+                     text-white
+                     bg-gradient-to-r from-amber-500 via-orange-500 to-amber-500
+                     bg-[length:200%_auto] animate-gradient
+                     shadow-lg shadow-amber-500/30
+                     hover:shadow-xl hover:shadow-amber-500/40
+                     hover:scale-[1.02] active:scale-[0.98]
+                     disabled:opacity-60 disabled:cursor-not-allowed disabled:scale-100
+                     transition-all duration-200
+                     flex items-center justify-center gap-2"
         >
-          {regenerateMut.isPending ? 'Starting…' : 'Regenerate from Scratch'}
+          <span className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.25),transparent_60%)]
+                           opacity-0 group-hover:opacity-100 transition-opacity" />
+          {regenerateMut.isPending ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin relative z-10" />
+              <span className="relative z-10">Regenerating…</span>
+            </>
+          ) : (
+            <>
+              <Sparkles className="w-4 h-4 relative z-10" />
+              <span className="relative z-10">Regenerate from Scratch</span>
+            </>
+          )}
         </button>
       </div>
     </div>
@@ -626,10 +879,10 @@ const CHECKLIST_TYPE_LABELS = {
 
 function ChecklistItemIcon({ status }) {
   if (status === 'pass') return <CheckCircle2 size={14} className="text-emerald-500 flex-shrink-0" />
-  if (status === 'fail') return <XCircle size={14} className="text-red-500 flex-shrink-0" />
-  if (status === 'stubbed') return <AlertTriangle size={14} className="text-yellow-500 flex-shrink-0" />
-  // pending or unknown
-  return <span className="w-3.5 h-3.5 flex-shrink-0 text-slate-300 text-xs leading-none">o</span>
+  if (status === 'partial') return <Circle size={14} className="text-emerald-500/60 flex-shrink-0" />
+  if (status === 'fail') return <XCircle size={14} className="text-error flex-shrink-0" />
+  if (status === 'stubbed') return <AlertTriangle size={14} className="text-warning flex-shrink-0" />
+  return <span className="w-3.5 h-3.5 flex-shrink-0 text-text-muted text-xs leading-none">o</span>
 }
 
 function ChecklistItemContent({ item }) {
@@ -637,55 +890,64 @@ function ChecklistItemContent({ item }) {
     return (
       <span className="flex items-center gap-1 text-xs font-mono">
         <span className="text-accent">{item.method}</span>
-        <span className="text-slate-600 dark:text-slate-400">{item.path}</span>
-        {item.auth_required && <Lock size={10} className="text-slate-400" />}
+        <span className="text-text-muted">{item.path}</span>
+        {item.auth_required && <Lock size={10} className="text-text-muted" />}
       </span>
     )
   }
   if (item.type === 'page') {
     return (
       <span className="flex items-center gap-1 text-xs">
-        <span className="font-mono text-slate-600 dark:text-slate-400">{item.route}</span>
-        {item.nav_label && <span className="text-slate-400">{item.nav_label}</span>}
-        {item.requires_auth && <Lock size={10} className="text-slate-400" />}
+        <span className="font-mono text-text-muted">{item.route}</span>
+        {item.nav_label && <span className="text-text-muted">{item.nav_label}</span>}
+        {item.requires_auth && <Lock size={10} className="text-text-muted" />}
       </span>
     )
   }
   if (item.type === 'model') {
     return (
-      <span className="text-xs text-slate-700 dark:text-slate-300">
+      <span className="text-xs text-text-default">
         {item.class_name}
         {item.columns?.length > 0 && (
-          <span className="text-slate-400"> ({item.columns.length} cols)</span>
+          <span className="text-text-muted"> ({item.columns.length} cols)</span>
         )}
       </span>
     )
   }
   if (item.type === 'seed') {
     return (
-      <span className="text-xs text-slate-700 dark:text-slate-300">
+      <span className="text-xs text-text-default">
         {item.model}
-        <span className="text-slate-400"> ({item.count} rows)</span>
+        <span className="text-text-muted"> ({item.count} rows)</span>
       </span>
     )
   }
   if (item.type === 'style') {
     return (
-      <span className="text-xs font-mono text-slate-600 dark:text-slate-400">
+      <span className="text-xs font-mono text-text-muted">
         {item.css_var}: {item.value}
       </span>
     )
   }
-  return <span className="text-xs text-slate-500">{item.id}</span>
+  return <span className="text-xs text-text-muted">{item.id}</span>
 }
 
 function ChecklistPanel({ checklist, checklistResults, projectId }) {
+  // Dedup by item_id — keep the latest entry per id (backend may emit duplicates
+  // during live-refresh cycles, which would cause >100% without this).
+  const dedupedResults = Array.from(
+    new Map((checklistResults || []).map((r) => [r.item_id, r])).values()
+  )
+
+  // Only count results that reference actual items in the current checklist.
+  const validItemIds = new Set(checklist.map((i) => i.id))
+  const validResults = dedupedResults.filter((r) => validItemIds.has(r.item_id))
+
   const resultsByItemId = {}
-  for (const r of (checklistResults || [])) {
+  for (const r of validResults) {
     resultsByItemId[r.item_id] = r
   }
 
-  // Group items by type
   const groups = {}
   for (const item of checklist) {
     const t = item.type || 'unknown'
@@ -694,21 +956,56 @@ function ChecklistPanel({ checklist, checklistResults, projectId }) {
   }
 
   const typeOrder = ['model', 'route', 'page', 'seed', 'style']
-  const orderedGroups = typeOrder
-    .filter((t) => groups[t])
-    .map((t) => [t, groups[t]])
+  const orderedGroups = typeOrder.filter((t) => groups[t]).map((t) => [t, groups[t]])
+
+  const passedCount = Math.min(
+    validResults.filter((r) => r.status === 'pass' || r.status === 'partial').length,
+    checklist.length,
+  )
+  const total = checklist.length
+  const allDone = passedCount === total && total > 0
+  const percent = total > 0 ? Math.min(100, Math.round((passedCount / total) * 100)) : 0
 
   return (
-    <div className="card space-y-2">
+    <div className="space-y-2">
       <CollapsibleSection
-        title={`Checklist (${checklist.length} items)`}
+        title={
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-semibold">Checklist</span>
+            <span
+              className={`text-xs font-mono px-2 py-0.5 rounded-full
+                         ${allDone
+                           ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 animate-pulse-slow'
+                           : 'bg-accent/10 text-accent'}`}
+            >
+              {passedCount} / {total}
+            </span>
+            {allDone ? (
+              <div className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400 animate-fade-in">
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span className="font-semibold">Everything built</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 text-xs text-text-muted">
+                <div className="w-16 h-1 rounded-full bg-surface-border overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-accent to-accent-secondary
+                               transition-all duration-500 ease-out"
+                    style={{ width: `${percent}%` }}
+                  />
+                </div>
+                <span className="tabular-nums">{percent}%</span>
+              </div>
+            )}
+          </div>
+        }
         storageKey={`checklist-panel-${projectId}`}
         defaultOpen={false}
       >
         <div className="space-y-4">
           {orderedGroups.map(([type, items]) => (
             <div key={type}>
-              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1.5">
+              <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-1.5">
                 {CHECKLIST_TYPE_LABELS[type] || type} ({items.length})
               </p>
               <ul className="space-y-1">
@@ -716,7 +1013,11 @@ function ChecklistPanel({ checklist, checklistResults, projectId }) {
                   const result = resultsByItemId[item.id]
                   const resultStatus = result?.status || 'pending'
                   return (
-                    <li key={item.id} className="flex items-center gap-2">
+                    <li
+                      key={item.id}
+                      className={`flex items-center gap-2 transition-all duration-500
+                                 ${resultStatus === 'pass' ? 'animate-checklist-pass' : ''}`}
+                    >
                       <ChecklistItemIcon status={resultStatus} />
                       <ChecklistItemContent item={item} />
                     </li>
@@ -752,7 +1053,7 @@ function StopButton({ projectId, status }) {
 
   return (
     <button
-      className="btn-secondary text-red-600 border-red-200 hover:bg-red-50 text-sm"
+      className="btn-secondary text-error border-error/30 hover:bg-error/5 text-sm"
       onClick={handleStop}
       disabled={stopping}
     >
@@ -789,7 +1090,7 @@ function RestartFromScratchButton({ projectId, status }) {
   )
 }
 
-// ── Blueprint / requirements collapsible panel ─────────────────────────────
+// ── Collapsible + Blueprint ─────────────────────────────────────────────────
 
 function CollapsibleSection({ title, children, defaultOpen = false, storageKey }) {
   const saved = storageKey ? sessionStorage.getItem(storageKey) : null
@@ -802,18 +1103,19 @@ function CollapsibleSection({ title, children, defaultOpen = false, storageKey }
   }
 
   return (
-    <div className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+    <div className="border border-surface-border rounded-lg overflow-hidden">
       <button
         onClick={toggle}
-        className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors text-left"
+        className="w-full flex items-center justify-between px-4 py-3
+                   bg-surface-page/50 hover:bg-surface-border/30 transition-colors text-left"
       >
-        <span className="text-sm font-medium text-slate-700 dark:text-slate-300">{title}</span>
+        <span className="text-sm font-medium text-text-default">{title}</span>
         {open
-          ? <ChevronDown size={16} className="text-slate-400" />
-          : <ChevronRight size={16} className="text-slate-400" />}
+          ? <ChevronDown size={16} className="text-text-muted" />
+          : <ChevronRight size={16} className="text-text-muted" />}
       </button>
       {open && (
-        <div className="px-4 py-3 bg-white dark:bg-slate-900 text-sm text-slate-700 dark:text-slate-300 space-y-2">
+        <div className="px-4 py-3 bg-surface-page/30 text-sm text-text-default space-y-2">
           {children}
         </div>
       )}
@@ -826,18 +1128,24 @@ function BlueprintPanel({ blueprint, summary, structuredRequirements, projectId 
 
   const entities = blueprint?.entities || []
   const routes = blueprint?.api_routes || blueprint?.api?.routes || blueprint?.routes || []
-  const pages = blueprint?.frontend?.pages || blueprint?.pages || []
+  const pages = (
+    blueprint?.frontend?.pages ||
+    blueprint?.pages ||
+    blueprint?.ui?.pages ||
+    blueprint?.screens ||
+    blueprint?.frontend_pages ||
+    []
+  )
 
   return (
-    <div className="card space-y-2">
+    <div className="space-y-2">
       <div className="flex items-center gap-2 mb-1">
-        <Code2 size={16} className="text-primary-600" />
-        <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+        <Code2 size={16} className="text-accent" />
+        <h2 className="text-sm font-semibold text-text-default">
           What the generator is building
         </h2>
       </div>
 
-      {/* Requirements */}
       {structuredRequirements?.user_requirements?.length > 0 && (
         <CollapsibleSection
           title={`Approved requirements (${structuredRequirements.user_requirements.length})`}
@@ -847,12 +1155,12 @@ function BlueprintPanel({ blueprint, summary, structuredRequirements, projectId 
             {structuredRequirements.user_requirements.map((r, i) => (
               <li key={r.id || i} className="flex gap-2">
                 {r.id && (
-                  <span className="shrink-0 text-xs font-mono text-slate-400 mt-0.5">{r.id}</span>
+                  <span className="shrink-0 text-xs font-mono text-text-muted mt-0.5">{r.id}</span>
                 )}
                 <span className="text-xs leading-relaxed">
                   {r.statement}
                   {r.acceptance_criteria?.length > 0 && (
-                    <span className="block text-slate-400 mt-0.5">
+                    <span className="block text-text-muted mt-0.5">
                       ✓ {r.acceptance_criteria.join(' · ')}
                     </span>
                   )}
@@ -863,35 +1171,31 @@ function BlueprintPanel({ blueprint, summary, structuredRequirements, projectId 
         </CollapsibleSection>
       )}
 
-      {/* Summary */}
       {summary && (
-        <CollapsibleSection title="Summary" storageKey={sk('summary')}>
-          <p className="text-xs leading-relaxed whitespace-pre-line">{summary}</p>
+        <CollapsibleSection title="Summary" storageKey={sk('summary')} defaultOpen>
+          <SummaryRendered text={summary} />
         </CollapsibleSection>
       )}
 
-      {/* Blueprint */}
       {(entities.length > 0 || routes.length > 0 || pages.length > 0) && (
         <CollapsibleSection title="Blueprint" storageKey={sk('blueprint')}>
           <div className="space-y-4">
             {entities.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1.5">
-                  Data model
-                </p>
+                <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-1.5">Data model</p>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs border-collapse">
                     <thead>
-                      <tr className="text-left border-b border-slate-200 dark:border-slate-700">
+                      <tr className="text-left border-b border-surface-border">
                         <th className="pb-1 pr-3 font-semibold">Entity</th>
                         <th className="pb-1 font-semibold">Fields</th>
                       </tr>
                     </thead>
                     <tbody>
                       {entities.map((e, i) => (
-                        <tr key={i} className="border-b border-slate-100 dark:border-slate-800">
+                        <tr key={i} className="border-b border-surface-border/50">
                           <td className="py-1 pr-3 font-medium whitespace-nowrap">{e.name}</td>
-                          <td className="py-1 text-slate-500 dark:text-slate-400">
+                          <td className="py-1 text-text-muted">
                             {Array.isArray(e.fields) ? e.fields.join(', ') : e.fields || '—'}
                           </td>
                         </tr>
@@ -904,21 +1208,13 @@ function BlueprintPanel({ blueprint, summary, structuredRequirements, projectId 
 
             {routes.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1.5">
-                  API endpoints
-                </p>
+                <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-1.5">API endpoints</p>
                 <ul className="space-y-0.5">
                   {routes.map((r, i) => (
                     <li key={i} className="flex gap-2 text-xs">
-                      <span className="shrink-0 font-mono text-accent">
-                        {r.method || 'GET'}
-                      </span>
-                      <span className="font-mono text-slate-600 dark:text-slate-400 shrink-0">
-                        {r.path}
-                      </span>
-                      {r.description && (
-                        <span className="text-slate-400">— {r.description}</span>
-                      )}
+                      <span className="shrink-0 font-mono text-accent">{r.method || 'GET'}</span>
+                      <span className="font-mono text-text-muted shrink-0">{r.path}</span>
+                      {r.description && <span className="text-text-muted">— {r.description}</span>}
                     </li>
                   ))}
                 </ul>
@@ -927,21 +1223,41 @@ function BlueprintPanel({ blueprint, summary, structuredRequirements, projectId 
 
             {pages.length > 0 && (
               <div>
-                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-1.5">
-                  Pages
+                <p className="text-xs font-bold text-text-muted uppercase tracking-widest mb-2">
+                  Pages that will be built ({pages.length})
                 </p>
-                <ul className="space-y-0.5">
+                <ul className="space-y-1.5">
                   {pages.map((p, i) => (
-                    <li key={i} className="flex gap-2 text-xs">
-                      <span className="font-mono text-slate-600 dark:text-slate-400 shrink-0">
-                        {p.route || p.path}
-                      </span>
-                      <span>{p.name || p.component}</span>
-                      {p.auth_required && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300">
-                          auth
-                        </span>
-                      )}
+                    <li
+                      key={i}
+                      className="flex items-center gap-3 p-2 rounded-lg
+                                 bg-surface-page/40 border border-surface-border/60"
+                    >
+                      <div className="flex-shrink-0 w-6 h-6 rounded-md
+                                      bg-gradient-to-br from-accent/20 to-accent-secondary/20
+                                      flex items-center justify-center text-[10px] font-bold text-accent">
+                        {i + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-text-default">
+                            {p.name || p.component || p.title || 'Page'}
+                          </span>
+                          {p.auth_required && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent/10 text-accent uppercase font-bold tracking-widest">
+                              auth
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs font-mono text-text-muted truncate">
+                          {p.route || p.path || '—'}
+                        </div>
+                        {(p.description || p.purpose) && (
+                          <p className="text-xs text-text-muted mt-0.5 line-clamp-2">
+                            {p.description || p.purpose}
+                          </p>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>

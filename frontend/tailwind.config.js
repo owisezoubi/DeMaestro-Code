@@ -104,6 +104,10 @@ export default {
           '0%':   { opacity: '0', transform: 'translateY(12px) scale(0.98)' },
           '100%': { opacity: '1', transform: 'translateY(0) scale(1)' },
         },
+        'scale-in': {
+          '0%':   { opacity: '0', transform: 'scale(0.93)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
+        },
         'slide-pulse': {
           '0%':   { transform: 'translateX(-100%)' },
           '100%': { transform: 'translateX(100%)' },
@@ -129,6 +133,7 @@ export default {
         'ring-pulse':      'ring-pulse 900ms ease-out',
         'just-created':    'just-created 1.4s ease-out',
         'question-in':     'question-in 450ms cubic-bezier(0.34, 1.56, 0.64, 1) both',
+        'scale-in':        'scale-in 200ms cubic-bezier(0.34, 1.56, 0.64, 1) both',
         'slide-pulse':     'slide-pulse 1.8s ease-in-out infinite',
         float:             'float 4s ease-in-out infinite',
       },

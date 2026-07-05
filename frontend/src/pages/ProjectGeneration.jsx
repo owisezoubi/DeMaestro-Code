@@ -24,6 +24,7 @@ import {
   FolderTree,
   MessageSquareQuote,
   Circle,
+  RotateCcw,
 } from 'lucide-react'
 
 import { getGenerationStatus, startGeneration, rerunTests, stopGeneration, restartFromScratch } from '../api/generation'
@@ -92,7 +93,7 @@ const STATUS_TO_STAGE = {
 
 const DONE_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed'])
 const TERMINAL_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed', 'failed', 'tests_failed_recoverable', 'stopped'])
-const DANGER_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed', 'failed', 'stopped'])
+const DANGER_STATUSES = new Set(['ready', 'ready_with_warnings', 'deployed', 'failed', 'tests_failed_recoverable', 'stopped'])
 
 function getStageState(stageIdx, currentStatus) {
   if (currentStatus === 'deployed') return 'completed'
@@ -243,9 +244,6 @@ export default function ProjectGeneration() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const [deleteConfirm, setDeleteConfirm] = useState(false)
-  const [deletingProject, setDeletingProject] = useState(false)
-
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['generationStatus', projectId],
     queryFn: () => getGenerationStatus(projectId),
@@ -255,18 +253,6 @@ export default function ProjectGeneration() {
       return 2000
     },
   })
-
-  async function handleDeleteProject() {
-    setDeletingProject(true)
-    try {
-      await deleteProjectAndPurge(qc, projectId)
-      toast.success('Project deleted')
-      navigate('/dashboard')
-    } catch (err) {
-      toast.error('Failed to delete: ' + (err.message || 'Unknown error'))
-      setDeletingProject(false)
-    }
-  }
 
   if (isLoading) {
     return (
@@ -523,70 +509,12 @@ export default function ProjectGeneration() {
 
         {/* Danger Zone */}
         {showDangerZone && (
-          <div className="relative rounded-2xl border border-error/30 bg-error/5 overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-error/40 to-transparent" />
-            <div className="p-6">
-              <h3 className="text-sm font-semibold text-error mb-1">Danger Zone</h3>
-              <p className="text-xs text-text-muted mb-4">
-                Deleting a project is permanent and cannot be undone.
-              </p>
-              <button
-                onClick={() => setDeleteConfirm(true)}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium
-                           border border-error/40 text-error hover:bg-error/10 transition-colors"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Delete project
-              </button>
-            </div>
-          </div>
+          <DangerZone
+            projectId={projectId}
+            projectName={status?.name || 'this project'}
+          />
         )}
       </main>
-
-      {/* Delete confirmation modal */}
-      {deleteConfirm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          onClick={() => { if (!deletingProject) setDeleteConfirm(false) }}
-        >
-          <div
-            className="bg-surface-panel rounded-xl shadow-xl p-6 max-w-sm w-full mx-4 border border-surface-border"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-lg font-semibold text-text-default mb-2">Delete project?</h2>
-            <p className="text-sm text-text-muted mb-6">
-              This will permanently delete all generated files, the deployment, and this project record. This cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setDeleteConfirm(false)}
-                disabled={deletingProject}
-                className="btn-secondary disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteProject}
-                disabled={deletingProject}
-                className="px-4 py-2 rounded-lg text-sm font-medium
-                           bg-red-600 hover:bg-red-700 text-white
-                           disabled:opacity-60 transition-colors
-                           inline-flex items-center gap-2"
-              >
-                {deletingProject ? (
-                  <>
-                    <span className="inline-block w-3.5 h-3.5 border-2 border-white
-                                      border-t-transparent rounded-full animate-spin" />
-                    Deleting…
-                  </>
-                ) : (
-                  'Delete project'
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -1267,5 +1195,169 @@ function BlueprintPanel({ blueprint, summary, structuredRequirements, projectId 
         </CollapsibleSection>
       )}
     </div>
+  )
+}
+
+// ── Danger Zone ───────────────────────────────────────────────────────────────
+
+function DangerZone({ projectId, projectName }) {
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+  const [confirm, setConfirm] = useState(null) // null | 'restart' | 'delete'
+
+  const restartMutation = useMutation({
+    mutationFn: () => restartFromScratch(projectId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['generationStatus', projectId] })
+      qc.invalidateQueries({ queryKey: ['deploymentStatus', projectId] })
+      qc.invalidateQueries({ queryKey: ['projects'] })
+      setConfirm(null)
+      toast.success('Starting over from scratch')
+    },
+    onError: (err) => {
+      const status = err.response?.status
+      if (status === 409) {
+        toast.error(err.response?.data?.detail || 'Wait for the current phase to finish.')
+      } else {
+        toast.error(err.friendlyMessage || err.message || 'Failed to restart')
+      }
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteProjectAndPurge(qc, projectId),
+    onSuccess: () => {
+      toast.success('Project deleted')
+      navigate('/dashboard')
+    },
+    onError: (err) => toast.error('Delete failed: ' + (err.message || 'Unknown error')),
+  })
+
+  const busy = restartMutation.isPending || deleteMutation.isPending
+
+  return (
+    <>
+      <div className="relative rounded-2xl border border-error/30 bg-error/5 overflow-hidden">
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-error/40 to-transparent" />
+        <div className="p-6">
+          <h3 className="text-sm font-semibold text-error mb-1">Danger Zone</h3>
+          <p className="text-xs text-text-muted mb-4">
+            These actions cannot be undone.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => setConfirm('restart')}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium
+                         border border-amber-500/40 text-amber-500 hover:bg-amber-500/10 transition-colors"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Start from scratch
+            </button>
+            <button
+              onClick={() => setConfirm('delete')}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium
+                         border border-error/40 text-error hover:bg-error/10 transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete project
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {confirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => { if (!busy) setConfirm(null) }}
+        >
+          <div
+            className="bg-surface-panel rounded-xl shadow-xl p-6 max-w-sm w-full mx-4
+                        border border-surface-border animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {confirm === 'restart' ? (
+              <>
+                <h2 className="text-lg font-semibold text-text-default mb-2">
+                  Start from scratch?
+                </h2>
+                <p className="text-sm text-text-muted mb-6">
+                  This will regenerate the code for{' '}
+                  <span className="font-semibold text-text-default">"{projectName}"</span>{' '}
+                  from scratch. Your requirements and blueprint are kept — the code
+                  will be rewritten, re-tested, and re-deployed. The current live
+                  URL will be replaced by the new build (same URL, new content).
+                </p>
+                <div className="flex justify-end gap-3">
+                  <button
+                    onClick={() => setConfirm(null)}
+                    disabled={busy}
+                    className="btn-secondary disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => restartMutation.mutate()}
+                    disabled={busy}
+                    className="px-4 py-2 rounded-lg text-sm font-medium bg-amber-500
+                               hover:bg-amber-600 text-white disabled:opacity-60
+                               transition-colors inline-flex items-center gap-2"
+                  >
+                    {restartMutation.isPending ? (
+                      <>
+                        <span className="inline-block w-3.5 h-3.5 border-2 border-white
+                                          border-t-transparent rounded-full animate-spin" />
+                        Restarting…
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Yes, restart
+                      </>
+                    )}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="text-lg font-semibold text-text-default mb-2">
+                  Delete project?
+                </h2>
+                <p className="text-sm text-text-muted mb-6">
+                  This will permanently delete all generated files, the deployment, and{' '}
+                  <span className="font-medium text-text-default">{projectName}</span>.{' '}
+                  This cannot be undone.
+                </p>
+                <div className="flex justify-end gap-3">
+                  <button
+                    onClick={() => setConfirm(null)}
+                    disabled={busy}
+                    className="btn-secondary disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => deleteMutation.mutate()}
+                    disabled={busy}
+                    className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600
+                               hover:bg-red-700 text-white disabled:opacity-60
+                               transition-colors inline-flex items-center gap-2"
+                  >
+                    {deleteMutation.isPending ? (
+                      <>
+                        <span className="inline-block w-3.5 h-3.5 border-2 border-white
+                                          border-t-transparent rounded-full animate-spin" />
+                        Deleting…
+                      </>
+                    ) : (
+                      'Delete project'
+                    )}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   )
 }

@@ -3752,38 +3752,29 @@ def _detect_duplicate_top_level_decls(content: str) -> list:
 
 # ── Unwrapped context-provider fixer ────────────────────────────────────────
 
-# Matches lowercase icon prop names rendered as JSX child: >{icon}< or >{leadingIcon}<
-_ICON_RENDER_AS_CHILD_RE = re.compile(
-    r"(?P<lead>>\s*\{)\s*(?P<name>icon|Icon|leadingIcon|trailingIcon)\s*\}",
+# Matches lucide-react import statements to extract the imported icon names
+_LUCIDE_IMPORT_RE = re.compile(
+    r"import\s*\{([^}]+)\}\s*from\s*['\"]lucide-react['\"]",
 )
 
-# Matches uppercase component names rendered as JSX child text: >{SomeIcon}<
-# These should be rendered as <SomeIcon /> instead.
+# Matches uppercase identifier rendered as JSX text child: >{SomeName}<
 _ICON_AS_CHILD_RE = re.compile(
     r">\s*\{\s*([A-Z][a-zA-Z0-9]*)\s*\}\s*<",
 )
 
 # Matches object.icon rendered as JSX child: >{item.icon}< or >{nav.icon}<
 _ICON_PROP_AS_CHILD_RE = re.compile(
-    r">\s*\{\s*(\w+)\.icon\s*\}\s*<",
+    r">\s*\{(\w+)\.icon\}\s*<",
 )
 
 
 def _fix_component_rendered_as_child(
     test_results: dict, generated_files: dict,
 ) -> dict:
-    """Rewrite component references rendered as JSX text children.
+    """Fix icon/component references rendered as JSX text children (React error #31).
 
-    Catches three patterns:
-    1. {icon} / {leadingIcon} — lowercase prop holding a component ref
-       → IIFE wrapper so it renders correctly regardless of component type
-    2. {SomeComponent} — uppercase identifier used as text child
-       → <SomeComponent />
-    3. {obj.icon} — object property rendered as text child
-       → IIFE wrapper
-
-    All three cause "Objects are not valid as a React child" at runtime.
-    Scans all frontend .jsx/.tsx files (not just ui/ components).
+    Only rewrites identifiers actually imported from lucide-react in the file,
+    avoiding false positives. Also fixes {obj.icon} patterns with an IIFE wrapper.
     """
     _log = structlog.get_logger("debugger")
     fixes: dict[str, str] = {}
@@ -3794,40 +3785,80 @@ def _fix_component_rendered_as_child(
         if not content:
             continue
 
+        # Collect names actually imported from lucide-react in this file
+        lucide_imports: set[str] = set()
+        for m in _LUCIDE_IMPORT_RE.finditer(content):
+            for raw in m.group(1).split(","):
+                name = raw.strip()
+                if " as " in name:
+                    name = name.split(" as ")[-1].strip()
+                if name:
+                    lucide_imports.add(name)
+
         new_content = content
 
-        # Pattern 1 — lowercase icon prop as child (IIFE wrap)
-        if re.search(r"\b(icon|leadingIcon|trailingIcon)\b", new_content):
-            if not re.search(r"const\s+(Icon|IconComp)\s*=\s*(icon|Icon)", new_content):
-                changed_p1 = False
+        # Fix {LucideIcon} rendered as text child → <LucideIcon />
+        if lucide_imports:
+            _captured = lucide_imports
 
-                def _rewrite_lc(m, _c=None):
-                    nonlocal changed_p1
-                    lead = m.group("lead")
-                    name = m.group("name")
-                    changed_p1 = True
-                    return (
-                        f"{lead}(() => {{ const __C = {name}; "
-                        f"return __C ? <__C /> : null; }})()"
-                        f"}}"
-                    )
+            def _rewrite_icon_child(m: re.Match, _icons: set = _captured) -> str:
+                name = m.group(1)
+                if name in _icons:
+                    return f"><{name} /><"
+                return m.group(0)
 
-                new_content = _ICON_RENDER_AS_CHILD_RE.sub(_rewrite_lc, new_content)
+            new_content = _ICON_AS_CHILD_RE.sub(_rewrite_icon_child, new_content)
 
-        # Pattern 2 — uppercase component name as text child → <Name />
-        new_content = _ICON_AS_CHILD_RE.sub(r"><\1 /><", new_content)
+        # Fix {item.icon} / {obj.icon} as text child → IIFE wrapper
+        def _rewrite_prop_icon(m: re.Match) -> str:
+            obj = m.group(1)
+            return f">{{(() => {{ const __C = {obj}.icon; return __C ? <__C /> : null; }})()}}<"
 
-        # Pattern 3 — obj.icon as text child (IIFE wrap)
-        def _rewrite_prop(m):
-            expr = m.group(0)[1:-1].strip()  # strip leading > and trailing <
-            inner = expr[1:-1].strip()        # strip { and }
-            return f"><(() => {{ const __C = {inner}; return __C ? <__C /> : null; }})())<"
-
-        new_content = _ICON_PROP_AS_CHILD_RE.sub(_rewrite_prop, new_content)
+        new_content = _ICON_PROP_AS_CHILD_RE.sub(_rewrite_prop_icon, new_content)
 
         if new_content != content:
             fixes[path] = new_content
             _log.info("fix_component_rendered_as_child.applied", path=path)
+
+    return fixes
+
+
+def _enforce_app_name_in_frontend(
+    test_results: dict, generated_files: dict,
+) -> dict:
+    """Rewrite invented app names in frontend files back to blueprint app_name.
+
+    The LLM sometimes substitutes a different name in the Navbar brand, hero h1,
+    and HTML title.  This fixer reads blueprint.app_name from the generator
+    context stored in generated_files["__meta__"] (if present) and rewrites
+    occurrences of common placeholder names.
+    """
+    _log = structlog.get_logger("debugger")
+    fixes: dict[str, str] = {}
+
+    meta = generated_files.get("__meta__") or {}
+    app_name: str = (meta.get("app_name") or "").strip()
+    invented_names: list[str] = meta.get("invented_names") or []
+
+    if not app_name or not invented_names:
+        return fixes
+
+    for path, content in generated_files.items():
+        if not isinstance(content, str):
+            continue
+        if not (path.startswith("frontend/src/") and path.endswith((".jsx", ".tsx", ".js", ".html"))):
+            continue
+        if not content:
+            continue
+
+        new_content = content
+        for bad_name in invented_names:
+            if bad_name and bad_name != app_name:
+                new_content = new_content.replace(bad_name, app_name)
+
+        if new_content != content:
+            fixes[path] = new_content
+            _log.info("enforce_app_name.rewrote", path=path, correct=app_name)
 
     return fixes
 
@@ -8953,6 +8984,7 @@ class DebuggerAgent:
         ("fix_hook_inline_definitions", _fix_hook_inline_definitions),
         ("fix_unwrapped_context_providers", _fix_unwrapped_context_providers),
         ("fix_component_rendered_as_child", _fix_component_rendered_as_child),
+        ("enforce_app_name_in_frontend", _enforce_app_name_in_frontend),
         ("fix_query_double_unwrap", _fix_query_double_unwrap),
         ("fix_shadcn_button_aschild", _fix_shadcn_button_aschild),
         ("fix_layout_import_inline_conflict", _fix_layout_import_inline_conflict),

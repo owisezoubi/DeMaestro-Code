@@ -1408,9 +1408,12 @@ visual preferences. Do NOT silently substitute defaults for things the user
 explicitly specified.
 """
 
+        _app_name = (getattr(structured_requirements, "app_name", None) or "").strip()
+
         return f"""You are a code generator. Generate ONE source file at a time, exactly as specified in the user message.
 
 **Project blueprint:**
+- App name:        {_app_name or "(see plan notes)"}
 - Database tables: {[t.name for t in blueprint.database_schema]}
 - API routes:      {[r.path for r in blueprint.api_routes]}
 - Frontend pages:  {[p.name for p in blueprint.frontend_pages]}
@@ -1974,6 +1977,36 @@ explicitly specified.
   OR destructure with a capitalized alias.  Never use a bare `<Icon>` tag unless
   Icon is actually imported or declared at the top of the file.
 
+- ICONS IN JSX (CRITICAL — this bug whitepages the entire deployed app) —
+  Every lucide-react icon MUST be rendered as a JSX element with angle brackets.
+  NEVER render it as a bare `{{Icon}}` expression inside JSX.
+
+  CORRECT — always angle brackets:
+      <ArrowRight />
+      <ArrowRight className="w-4 h-4 text-accent" />
+      <button><ArrowRight /> Continue</button>
+
+  BROKEN — throws React error #31 at first render, whole page turns white:
+      {{ArrowRight}}
+      <span>{{ArrowRight}}</span>
+      <button>{{ArrowRight}} Continue</button>
+      <div>{{items[0].icon}}</div>
+
+  When iterating over data that has an icon prop, ALWAYS destructure to a
+  capitalized const inside the map body BEFORE rendering:
+
+      // GOOD
+      items.map((item) => {{
+        const Icon = item.icon
+        return <Icon className="w-4 h-4" />
+      }})
+
+      // BROKEN — {{item.icon}} inside JSX renders the component object as text
+      items.map((item) => <div>{{item.icon}}</div>)
+
+  Rule of thumb: if you write `{{X}}` in JSX, X must be a string, number, or
+  already-rendered JSX — NEVER a component. If it's a component, wrap it: `<X />`.
+
 - ROUTES CONFIG — frontend/src/lib/routes.js is the single source of truth for
   navigation. When generating this file, include an entry for EVERY page from
   the blueprint with appropriate `show_in_nav` and `requires` values:
@@ -2026,6 +2059,16 @@ explicitly specified.
       }}
 
   App.jsx route mounting should also loop over ROUTES to avoid drift.
+
+- APP NAME — the blueprint contains an `app_name` field (also shown at the top
+  of this prompt as "App name:"). You MUST use that exact name verbatim in:
+    * The HTML <title> (index.html or vite.config.js title)
+    * The Navbar brand/logo text
+    * Any hero <h1> on the landing / home page
+    * The README title (if generated)
+  NEVER invent a different name, translate it, abbreviate it, or replace it with
+  a generic placeholder like "MyApp" or "App". The app name is set by the user —
+  it is not yours to change.
 
 - NAVBAR VISIBILITY — every user-facing page MUST have `show_in_nav: true`
   in its routes.js entry UNLESS it is one of the following exceptions:

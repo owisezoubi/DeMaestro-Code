@@ -288,14 +288,24 @@ async def restart_from_scratch(project_id: str, user: CurrentUser) -> dict:
             status_code=409,
             detail="Cannot restart while generation is running. Stop the current run first.",
         )
-    if project.status not in {
+    # Broadened — a user can start over from ANY terminal state, not just
+    # failure states. This includes shipped projects (`ready`, `deployed`)
+    # where the user wants a fresh code generation.
+    _RESTARTABLE_STATUSES = {
         ProjectStatus.stopped,
         ProjectStatus.failed,
         ProjectStatus.tests_failed_recoverable,
-    }:
+        ProjectStatus.ready,
+        ProjectStatus.ready_with_warnings,
+        ProjectStatus.deployed,
+        ProjectStatus.modifying,
+        ProjectStatus.regenerating,
+    }
+    if project.status not in _RESTARTABLE_STATUSES:
         raise HTTPException(
             status_code=409,
-            detail=f"Cannot restart from status '{project.status.value}'.",
+            detail=f"Cannot restart from status '{project.status.value}'. "
+                   f"Wait for the current phase to finish first.",
         )
     clear_cancellation(project_id)
     firestore_service.reset_generation_state(user.uid, project_id)

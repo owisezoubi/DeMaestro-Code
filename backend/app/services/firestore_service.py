@@ -165,12 +165,10 @@ def delete_project(uid: str, project_id: str) -> None:
 
 
 def reset_generation_state(uid: str, project_id: str) -> None:
-    """Clear all artifacts from a previous generation attempt.
+    """Wipe all generation + deployment fields so the pipeline can start fresh.
 
-    Sets status back to awaiting_approval so trigger_generation can
-    immediately transition it to generating and run_full_pipeline starts
-    from cycle 1 with a clean slate.  Blueprint and structured requirements
-    are preserved so no user work is lost.  Idempotent.
+    Preserves: name, description, structured_requirements, blueprint, checklist
+    — the user's captured intent stays intact.  Idempotent.
     """
     _log = structlog.get_logger("firestore_service")
     project_ref = _project_doc(uid, project_id)
@@ -183,10 +181,10 @@ def reset_generation_state(uid: str, project_id: str) -> None:
 
     project_ref.update({
         "status": ProjectStatus.awaiting_approval,
-        "generated_files": None,
+        "generated_files": {},
         "generation_plan": None,
         "generated_count": 0,
-        "total_files": None,
+        "total_files": 0,
         "current_file": None,
         "current_stage": None,
         "last_failed_checks": [],
@@ -201,6 +199,20 @@ def reset_generation_state(uid: str, project_id: str) -> None:
         "generation_finished_at": None,
         "test_results_last": None,
         "modified_files_last": [],
+        "checklist_results": [],
+        "test_results": None,
+        "typecheck_warnings": 0,
+        "typecheck_advisory_output": None,
+        "contract_advisory_misses": [],
+        "zip_url": None,
+        # Deployment fields — new deploy overwrites in-place but clear
+        # the URL immediately so the UI doesn't show the old live link
+        # while the new build is running.
+        "deployment_url": None,
+        "deployment_status": None,
+        "deployment_project_name": None,
+        "deployment_display_name": None,
+        "deployment_error": None,
         "updated_at": datetime.now(timezone.utc),
     })
     _log.info("generation.reset_done", project_id=project_id, files_deleted=files_cleared)

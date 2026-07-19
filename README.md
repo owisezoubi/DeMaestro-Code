@@ -133,9 +133,7 @@ demaestro/
 │   └── .env.example
 │
 ├── docker-compose.yml       Local dev convenience
-├── BOOK_CHANGES.md          Phase A → B delta log
 ├── SETUP_GUIDE.md           Step-by-step setup
-├── AI_PROMPT.md             Prompt to regenerate skeleton via another AI
 └── README.md                This file
 ```
 
@@ -206,8 +204,6 @@ pytest
 ## Documents
 
 - [SETUP_GUIDE.md](./SETUP_GUIDE.md) — prerequisites, Firebase setup, GitHub, and first run.
-- [BOOK_CHANGES.md](./BOOK_CHANGES.md) — running list of Phase B decisions that changed Phase A.
-- [AI_PROMPT.md](./AI_PROMPT.md) — self-contained prompt to regenerate this skeleton via another AI tool.
 
 ## License
 

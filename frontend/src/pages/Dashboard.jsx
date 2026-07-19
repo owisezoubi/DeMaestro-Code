@@ -14,14 +14,13 @@ import { deleteProjectAndPurge } from '../lib/deleteWithCachePurge'
 import ProjectCardSkeleton from '../components/ProjectCardSkeleton'
 
 function routeForStatus(status, id) {
-  const approval = new Set(['awaiting_approval', 'approved'])
+  const approval = new Set(['awaiting_approval'])
   const generation = new Set([
+    'approved',                    // already approved → pipeline should be running
     'blueprinting', 'generating', 'generated', 'testing', 'tested',
     'verifying', 'verified', 'deploying', 'packaging',
     'ready', 'ready_with_warnings', 'deployed',
     'modifying', 'regenerating',
-    // Failure states — generation page has RecoverableFailureScreen and
-    // ErrorScreen ready for these; ProjectChat would loop on /status forever.
     'tests_failed_recoverable', 'failed', 'stopped',
   ])
   if (approval.has(status)) return `/projects/${id}/approve`

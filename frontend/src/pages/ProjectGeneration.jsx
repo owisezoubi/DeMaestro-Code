@@ -264,6 +264,27 @@ export default function ProjectGeneration() {
     else if (status) failCount.current = 0
   }, [error, status])
 
+  // Recovery: if we landed here with status 'approved' but generation never
+  // started (e.g. wifi dropped right after approval), kick it off once.
+  // 409 means already running — silently ignore.
+  const resumedRef = useRef(false)
+  useEffect(() => {
+    if (!status || resumedRef.current) return
+    if (status.status === 'approved') {
+      resumedRef.current = true
+      startGeneration(projectId)
+        .then(() => {
+          toast.info('Resuming generation…')
+          qc.invalidateQueries({ queryKey: ['generationStatus', projectId] })
+        })
+        .catch((err) => {
+          if (err.response?.status !== 409) {
+            console.warn('Auto-resume failed', err)
+          }
+        })
+    }
+  }, [status?.status, projectId, qc])
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-surface-page flex items-center justify-center">

@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import Markdown from 'react-markdown'
 import { toast } from 'sonner'
-import { CheckCircle2, Database, Layout, Loader2, Pencil, Plus, Users } from 'lucide-react'
+import { ArrowRight, CheckCircle2, Database, Layout, Loader2, Pencil, Plus, Users } from 'lucide-react'
 
 import EditRequirementsModal from '../components/EditRequirementsModal'
 import { approveProject } from '../api/approval'
@@ -36,13 +36,26 @@ export default function ProjectApproval() {
     mutationFn: () => approveProject(projectId),
     onSuccess: async () => {
       toast.success('Approved! Starting generation…')
-      // Fire-and-forget: start generation in the background, then navigate.
-      // Errors here are non-fatal — generation page polls for current status.
       startGeneration(projectId).catch(() => {})
       navigate(`/projects/${projectId}/generation`)
     },
     onError: (err) =>
       toast.error(err.friendlyMessage || err.message || 'Approval failed. Please try again.'),
+  })
+
+  const kickoffMut = useMutation({
+    mutationFn: () => startGeneration(projectId),
+    onSuccess: () => {
+      toast.info('Starting generation…')
+      navigate(`/projects/${projectId}/generation`, { replace: true })
+    },
+    onError: (err) => {
+      if (err.response?.status === 409) {
+        navigate(`/projects/${projectId}/generation`, { replace: true })
+      } else {
+        toast.error(err.friendlyMessage || 'Failed to start generation')
+      }
+    },
   })
 
   if (isLoading) {
@@ -134,24 +147,53 @@ export default function ProjectApproval() {
             <Pencil className="w-4 h-4 mr-2" />
             Edit requirements
           </button>
-          <button
-            className="btn-primary"
-            disabled={approveMut.isPending || !canApprove}
-            onClick={() => approveMut.mutate()}
-          >
-            {approveMut.isPending ? (
-              <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                Approving…
-              </>
-            ) : isApproved ? (
-              'Already Approved'
-            ) : isGenerating ? (
-              'Generating…'
-            ) : (
-              'Approve & Generate →'
-            )}
-          </button>
+          {isApproved ? (
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg
+                              bg-emerald-500/10 border border-emerald-500/30
+                              text-emerald-600 dark:text-emerald-400 text-sm">
+                <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                <span className="font-medium">
+                  Approved {new Date(project.approved_at).toLocaleString()}
+                </span>
+              </div>
+              <button
+                onClick={() => kickoffMut.mutate()}
+                disabled={kickoffMut.isPending}
+                className="btn-primary inline-flex items-center gap-2
+                           disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {kickoffMut.isPending ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    Continue to generation
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            </div>
+          ) : (
+            <button
+              className="btn-primary"
+              disabled={approveMut.isPending || !canApprove}
+              onClick={() => approveMut.mutate()}
+            >
+              {approveMut.isPending ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Approving…
+                </>
+              ) : isGenerating ? (
+                'Generating…'
+              ) : (
+                'Approve & Generate →'
+              )}
+            </button>
+          )}
         </div>
       </main>
 

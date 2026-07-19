@@ -27,11 +27,12 @@ _IN_PROGRESS_STATUSES = {
     ProjectStatus.regenerating,
 }
 
-# Statuses from which "Regenerate from Scratch" is allowed.
+# Statuses from which a full generation run can be started/resumed.
 _GENERATE_FROM_STATUSES = {
-    ProjectStatus.approved,
-    ProjectStatus.failed,
-    ProjectStatus.tests_failed_recoverable,
+    ProjectStatus.approved,                 # first-time run after approval
+    ProjectStatus.failed,                   # retry after unrecoverable failure
+    ProjectStatus.tests_failed_recoverable, # full regen instead of re-running tests
+    ProjectStatus.stopped,                  # resume after user stopped the run
 }
 
 

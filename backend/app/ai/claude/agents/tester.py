@@ -1373,13 +1373,18 @@ ignore_missing_imports = True
         backend_port = 8002  # distinct from boot's 8001 to avoid port reuse race
         base = f"http://127.0.0.1:{backend_port}"
         backend_proc = None
+        _stderr_tmp = None
         try:
+            import tempfile as _tempfile
+            _stderr_tmp = _tempfile.NamedTemporaryFile(
+                mode="w", suffix=".smoke_stderr.txt", delete=False
+            )
             backend_proc = subprocess.Popen(
                 [str(venv_python), "-m", "uvicorn", "app.main:app",
                  "--host", "127.0.0.1", "--port", str(backend_port)],
                 cwd=backend_dir,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=_stderr_tmp,
             )
 
             # Wait up to 15s for the backend to start
@@ -1460,19 +1465,46 @@ ignore_missing_imports = True
                     register_path = next((p for p in paths if "register" in p), None)
                     register_status = 0
                     if register_path:
-                        register_status, _ = _post_json(
+                        register_status, register_body = _post_json(
                             f"{base}{register_path}",
                             {"email": f"smoke_{int(time.time())}@example.com",
                              "password": "smoke1234", "name": "Smoke Test"},
                         )
                         if register_status >= 500:
+                            # Capture response body for diagnostics.
+                            try:
+                                response_body_str = str(register_body)[:800]
+                            except Exception:
+                                response_body_str = "<could not read body>"
+
+                            # Drain available stderr from the uvicorn process.
+                            subprocess_stderr = ""
+                            try:
+                                if _stderr_tmp is not None:
+                                    _stderr_tmp.flush()
+                                    import os as _os
+                                    _ssize = _os.path.getsize(_stderr_tmp.name)
+                                    with open(_stderr_tmp.name, "r", errors="replace") as _sf:
+                                        _sf.seek(max(0, _ssize - 4000))
+                                        subprocess_stderr = _sf.read()
+                            except Exception:
+                                pass
+
                             smoke_status = "failed"
                             smoke_log = (
                                 f"register {register_path} returned {register_status} "
-                                "(server error — auth scaffold broken)"
+                                f"(server error — auth scaffold broken). "
+                                f"Response body: {response_body_str}. "
+                                f"Backend stderr tail: "
+                                f"{subprocess_stderr[-1500:] if subprocess_stderr else '<none>'}"
                             )
-                            log.error("smoke.register_server_error",
-                                      path=register_path, status=register_status)
+                            log.error(
+                                "smoke.register_server_error",
+                                path=register_path,
+                                status=register_status,
+                                body_preview=response_body_str[:400],
+                                stderr_tail=subprocess_stderr[-2000:],
+                            )
                         else:
                             log.info("smoke.register_ok", status=register_status)
 
@@ -1558,6 +1590,13 @@ ignore_missing_imports = True
                     backend_proc.wait(timeout=5)
                 except Exception:
                     backend_proc.kill()
+            if _stderr_tmp is not None:
+                try:
+                    _stderr_tmp.close()
+                    import os as _os
+                    _os.unlink(_stderr_tmp.name)
+                except Exception:
+                    pass
 
     def _run_reachability(
         self,

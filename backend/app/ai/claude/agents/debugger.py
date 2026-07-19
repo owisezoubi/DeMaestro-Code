@@ -4665,14 +4665,92 @@ def _levenshtein(a: str, b: str) -> int:
     return dp[n]
 
 
-def _fix_cross_file_name_mismatch(test_results: dict, generated_files: dict) -> dict:
-    """Detect and fix cross-file name mismatches (e.g. FavoredPlant vs FavoritePlant).
+def _restore_user_model_in_auth_routes(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """If auth_routes.py imports or uses `Order` where User is expected,
+    restore User. Defensive fixer for cases where a previous cycle's rename
+    helper corrupted the auth scaffold.
 
-    Builds an export map from each generated Python module, then checks every
-    `from X import Y` against that map.  If Y is missing but a close name exists
-    (Levenshtein distance ≤ 2), rewrites the import AND all references in the
-    importing file.
+    Detection heuristics:
+      1. The scaffold's auth_routes.py hashes payload.password and creates a
+         new user.  `Order(email=..., password_hash=...)` means Order has no
+         password_hash column — that's the corrupted state.
+      2. `db.query(Order).filter(Order.id == ...)` inside auth-related files
+         means get_current_user was overwritten.
+
+    Idempotent: no-op if auth_routes.py already imports User correctly.
     """
+    _log = structlog.get_logger("debugger")
+    fixes: dict = {}
+
+    auth_related = [
+        "backend/app/routes/auth_routes.py",
+        "backend/app/auth.py",
+    ]
+
+    for fp in auth_related:
+        content = generated_files.get(fp)
+        if not content:
+            continue
+
+        signals = [
+            "Order(email=" in content,
+            "Order.password_hash" in content,
+            "db.query(Order).filter(Order.id" in content and "get_current_user" in content,
+            "from app.models import Order" in content and "hash_password" in content,
+        ]
+        if not any(signals):
+            continue
+
+        new_content = re.sub(r"\bOrder\b", "User", content)
+
+        new_content = re.sub(
+            r"from\s+app\.models\s+import\s+([^\n]+)",
+            lambda m: (
+                "from app.models import "
+                + ", ".join(n.strip() for n in m.group(1).split(",")
+                            if n.strip() != "Order")
+                + (", User" if "User" not in m.group(1) else "")
+            ),
+            new_content,
+        )
+
+        if new_content != content:
+            fixes[fp] = new_content
+            _log.info(
+                "restore_user_model_in_auth_routes.applied",
+                file=fp,
+            )
+
+    return fixes
+
+
+def _fix_cross_file_name_mismatch(test_results: dict, generated_files: dict) -> dict:
+    """Rewrite cross-file identifier mismatches (LLM emits `MenuItem`
+    in routes but `MenuItems` in models, etc.)
+
+    CRITICAL SAFETY: never rename scaffold-owned identifiers.  The
+    scaffold guarantees these names exist and any 'rename' would
+    destroy the auth flow (register 503s, /me fails, JWT lookup
+    breaks — all confirmed in production incidents).
+    """
+    _log = structlog.get_logger("debugger")
+
+    # ── Scaffold identifiers this helper must NEVER touch ────────────
+    _SCAFFOLD_PROTECTED = frozenset({
+        # Auth model (from auth_models.py)
+        "User",
+        # Core imports the scaffold ships
+        "Base",
+        # Auth utility functions
+        "hash_password", "verify_password", "create_access_token",
+        "get_current_user", "require_admin",
+        "get_password_hash", "verify_pwd", "create_token",
+        # Auth schemas ONLY when they're from the scaffold
+        "LoginRequest", "RegisterRequest",
+    })
+
     # Build module export map: file path -> set of PascalCase top-level names
     module_exports: dict[str, set[str]] = {}
     for path, content in generated_files.items():
@@ -4718,7 +4796,32 @@ def _fix_cross_file_name_mismatch(test_results: dict, generated_files: dict) -> 
                     if d <= 3 and d < best_dist:
                         best_dist, best_match = d, export
                 if best_match:
-                    structlog.get_logger("debugger").info(
+                    # Guard: never rename a scaffold-owned identifier away
+                    if imp_name in _SCAFFOLD_PROTECTED:
+                        _log.warning(
+                            "fix_cross_file_name_mismatch.blocked_scaffold_rename",
+                            source=path,
+                            would_rename_from=imp_name,
+                            would_rename_to=best_match,
+                            reason=(
+                                "Scaffold owns this identifier. Renaming would break the "
+                                "auth flow. Skip and let the agentic LLM decide what to fix "
+                                "instead."
+                            ),
+                        )
+                        continue
+
+                    # Guard: never rename INTO a scaffold identifier from a non-scaffold source
+                    if best_match in _SCAFFOLD_PROTECTED and imp_name not in _SCAFFOLD_PROTECTED:
+                        _log.warning(
+                            "fix_cross_file_name_mismatch.blocked_scaffold_collision",
+                            source=path,
+                            from_name=imp_name,
+                            to_name=best_match,
+                        )
+                        continue
+
+                    _log.info(
                         "debugger.fix_cross_file_name_mismatch.applied",
                         source=path, fixed_name=imp_name, to=best_match,
                     )
@@ -8937,6 +9040,75 @@ def _ensure_public_home_page(
     return {page_path: stub}
 
 
+def _fix_smoke_503_scaffold_broken(
+    test_results: dict, generated_files: dict
+) -> dict:
+    """When smoke fails with 5xx on /api/auth/register, apply the top three
+    diagnostics for a broken auth scaffold:
+
+      1. Duplicate User class in models.py + auth_models.py
+      2. Missing or unpinned bcrypt in requirements.txt
+      3. models.py missing the `from app.auth_models import User` re-export
+
+    Fires before the LLM so we fix known patterns cheaply.
+    """
+    _log = structlog.get_logger("debugger")
+
+    passed = test_results.get("passed_checks") or {}
+    if passed.get("smoke") not in ("failed", "advisory_failed"):
+        return {}
+
+    errors_blob = " ".join(str(e) for e in (test_results.get("errors") or []))
+    smoke_log = (test_results.get("logs") or {}).get("smoke", "")
+    haystack = (errors_blob + " " + smoke_log).lower()
+
+    is_duplicate_user = (
+        "table 'users' is already defined" in haystack
+        or "already defined for this metadata" in haystack
+    )
+    is_bcrypt_issue = (
+        "bcrypt" in haystack
+        or "passlib" in haystack
+        or "__about__" in haystack
+    )
+    is_scaffold_5xx = (
+        "returned 5" in haystack
+        or "auth scaffold broken" in haystack
+        or "503" in haystack
+    )
+
+    fixes: dict = {}
+
+    if is_duplicate_user or is_scaffold_5xx:
+        fixes.update(_fix_duplicate_users_table(test_results, generated_files))
+
+    if is_bcrypt_issue or is_scaffold_5xx:
+        fixes.update(_pin_bcrypt_for_vercel(test_results, generated_files))
+
+    if is_scaffold_5xx:
+        models_path = "backend/app/models.py"
+        models_content = generated_files.get(models_path, "")
+        if (
+            models_content
+            and "from app.auth_models import User" not in models_content
+            and "class User" in models_content
+        ):
+            new_content = "from app.auth_models import User  # noqa: F401\n" + models_content
+            fixes[models_path] = new_content
+            _log.info("fix_smoke_503.re_exported_user", path=models_path)
+
+    if fixes:
+        _log.info(
+            "fix_smoke_503_scaffold_broken.applied",
+            duplicate_user=is_duplicate_user,
+            bcrypt_issue=is_bcrypt_issue,
+            scaffold_5xx=is_scaffold_5xx,
+            files=list(fixes.keys()),
+        )
+
+    return fixes
+
+
 class DebuggerAgent:
     """Parses test errors and uses Claude to fix them.
 
@@ -8949,6 +9121,9 @@ class DebuggerAgent:
     # Ordered list of (name, fixer_fn) for all deterministic pre-LLM fixers.
     # FIX ORDER MATTERS — see debug_and_fix docstring for constraints.
     _PRE_LLM_FIXERS: list = [
+        # ── Phase -1: smoke 5xx triage (fires first — cheaply unblocks auth) ─
+        ("fix_smoke_503_scaffold_broken", _fix_smoke_503_scaffold_broken),
+
         # ── Phase 0: structural dedup (must run before any content changes) ──
         # Cleans up duplicate top-level declarations left by a prior cycle's bad
         # fix (e.g. two Layout() in App.jsx) so subsequent helpers operate on a
@@ -9018,6 +9193,7 @@ class DebuggerAgent:
         ("fix_missing_main_py", _fix_missing_main_py),
         ("add_missing_python_packages", _add_missing_python_packages),
         ("fix_legacy_column_to_mapped", _fix_legacy_column_to_mapped),
+        ("restore_user_model_in_auth_routes", _restore_user_model_in_auth_routes),
         ("fix_cross_file_name_mismatch", _fix_cross_file_name_mismatch),
         ("fix_duplicate_operation_ids", _fix_duplicate_operation_ids),
         ("fix_duplicate_app_definition", _fix_duplicate_app_definition),
@@ -9346,6 +9522,12 @@ class DebuggerAgent:
                 has_500 = "server error: 500" in err_lower_blob
                 has_reach_hint = "reachability:" in err_lower_blob or has_500
                 has_smoke_hint = "smoke" in err_lower_blob and "fail" in err_lower_blob
+                # smoke 5xx: log says "returned 5xx" / "scaffold broken" — no "fail" word
+                has_smoke_5xx = smoke_failed and (
+                    "returned 5" in err_lower_blob
+                    or "scaffold broken" in err_lower_blob
+                    or "internal server error" in err_lower_blob
+                )
                 has_contract_hint = "contract miss" in err_lower_blob
 
                 # Pull file paths out of any stack traces in the error strings.
@@ -9357,6 +9539,7 @@ class DebuggerAgent:
                     and (
                         (reachability_failed and has_reach_hint)
                         or (smoke_failed and has_smoke_hint)
+                        or has_smoke_5xx
                         or (contract_failed and has_contract_hint)
                         or (febe_failed and ("fe_be" in err_lower_blob or "shape" in err_lower_blob))
                         or has_backend_trace  # trace alone is sufficient signal
@@ -9390,13 +9573,18 @@ class DebuggerAgent:
                             "'settings' row is expected, seed it. Do NOT delete "
                             "the routes."
                         )
-                    if smoke_failed and has_smoke_hint:
+                    if smoke_failed and (has_smoke_hint or has_smoke_5xx):
                         focus_parts.append(
                             "SMOKE: The auth smoke test (register → login → /me) "
                             "failed. Inspect auth_routes.py and the User model. "
-                            "Common causes: password hash field name mismatch, "
-                            "missing 'role' default, JWT secret env var name "
-                            "mismatch, response shape missing required fields."
+                            "Common causes: (a) duplicate User class — models.py "
+                            "redefines User instead of importing from app.auth_models; "
+                            "(b) bcrypt/passlib version mismatch — pin bcrypt>=4.0.1 "
+                            "in requirements.txt; (c) password hash field name mismatch; "
+                            "(d) missing 'role' default; (e) JWT secret env var name "
+                            "mismatch; (f) response shape missing required fields. "
+                            "The smoke_log in test_results contains the full response "
+                            "body and backend stderr — read it first."
                         )
                     if contract_failed and has_contract_hint:
                         focus_parts.append(
